@@ -7,12 +7,13 @@ use byteorder::{NetworkEndian, ReadBytesExt, WriteBytesExt};
 
 #[cfg(feature = "nss")]
 use crate::nss::{
-    hpke::{generate_key_pair, Config as HpkeConfig, HpkeR},
+    hpke::{generate_key_pair, parse_key_pair, Config as HpkeConfig, HpkeR},
     PrivateKey, PublicKey,
 };
 #[cfg(feature = "rust-hpke")]
 use crate::rh::hpke::{
-    derive_key_pair, generate_key_pair, Config as HpkeConfig, HpkeR, PrivateKey, PublicKey,
+    derive_key_pair, generate_key_pair, parse_key_pair, Config as HpkeConfig, HpkeR, PrivateKey,
+    PublicKey,
 };
 use crate::{
     err::{Error, Res},
@@ -69,6 +70,27 @@ impl KeyConfig {
         Self::strip_unsupported(&mut symmetric, kem);
         assert!(!symmetric.is_empty());
         let (sk, pk) = generate_key_pair(kem)?;
+        Ok(Self {
+            key_id,
+            kem,
+            symmetric,
+            sk: Some(sk),
+            pk,
+        })
+    }
+
+    /// Construct a configuration for the server side.
+    /// # Panics
+    /// If the configurations don't include a supported configuration.
+    pub fn new_from_pkcs8_pem(
+        key_id: u8,
+        kem: Kem,
+        mut symmetric: Vec<SymmetricSuite>,
+        pem_data: &str,
+    ) -> Res<Self> {
+        Self::strip_unsupported(&mut symmetric, kem);
+        assert!(!symmetric.is_empty());
+        let (sk, pk) = parse_key_pair(kem, pem_data)?;
         Ok(Self {
             key_id,
             kem,
@@ -386,5 +408,20 @@ mod test {
         assert_eq!(usize::from(x25519[36]), SYMMETRIC.len() * 4);
         x25519[36] = 1;
         assert!(matches!(KeyConfig::decode(&x25519), Err(Error::Format)));
+    }
+
+    #[test]
+    fn create_from_pkcs8_pem() {
+        init();
+
+        let pem_data = "-----BEGIN PRIVATE KEY-----
+MC4CAQAwBQYDK2VuBCIEIAgFWQfJv7DnZqs7W/aHM+aa5kXnFTlLQAso2qIAJyVT
+-----END PRIVATE KEY-----";
+        let config =
+            KeyConfig::new_from_pkcs8_pem(KEY_ID, KEM, Vec::from(SYMMETRIC), pem_data).unwrap();
+        assert_eq!(config.key_id, KEY_ID);
+        assert_eq!(config.kem, KEM);
+        config.pk.key_data().unwrap();
+        assert!(config.sk.is_some());
     }
 }

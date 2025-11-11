@@ -41,6 +41,11 @@ pub enum Error {
     #[cfg(feature = "stream")]
     #[error("writes are not supported after closing")]
     WriteAfterClose,
+    #[error("invalid PEM data")]
+    InvalidPem(#[from] pem::PemError),
+    #[cfg(feature = "rust-hpke")]
+    #[error("invalid PKCS#8 data")]
+    InvalidPkcs8(#[from] pkcs8::Error),
 }
 
 impl From<std::num::TryFromIntError> for Error {

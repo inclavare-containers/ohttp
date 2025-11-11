@@ -19,7 +19,7 @@ client = []
 external-sqlite = []
 gecko = ["nss", "mozbuild"]
 nss = ["bindgen"]
-rust-hpke = ["rand", "aead", "aes-gcm", "chacha20poly1305", "hkdf", "sha2", "hpke"]
+rust-hpke = ["rand", "aead", "aes-gcm", "chacha20poly1305", "hkdf", "sha2", "hpke", "dep:pkcs8"]
 server = []
 stream = ["dep:futures", "dep:pin-project"]
 unsafe-print-secrets = []
@@ -39,6 +39,8 @@ rand = {version = "0.9", optional = true}
 regex = {version = "~1.11", optional = true}
 sha2 = {version = "0.10", optional = true}
 thiserror = "2"
+pem = "3.0"
+pkcs8 = {version = "0.10", features = ["std"], optional = true}
 
 [build-dependencies]
 mozbuild = {version = "0.1", optional = true}
@@ -55,3 +57,4 @@ features = ["runtime"]
 [dev-dependencies]
 env_logger = {version = "0.10", default-features = false}
 sync-async = {path = "../sync-async"}
+base64 = "0.22.1"

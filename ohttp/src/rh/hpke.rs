@@ -2,7 +2,8 @@ use std::ops::Deref;
 
 use ::hpke as rust_hpke;
 use ::rand::rng;
-use log::trace;
+use log::{error, trace};
+use pkcs8::ObjectIdentifier;
 use rust_hpke::{
     aead::{AeadCtxR, AeadCtxS, AeadTag, AesGcm128, ChaCha20Poly1305},
     kdf::HkdfSha256,
@@ -465,6 +466,38 @@ pub fn generate_key_pair(kem: Kem) -> Res<(PrivateKey, PublicKey)> {
         }
     };
     trace!("Generated key pair: sk={sk:?} pk={pk:?}");
+    Ok((sk, pk))
+}
+
+/// Parse a key pair from PKCS#8 PEM format for the identified KEM.
+#[allow(clippy::unnecessary_wraps)]
+pub fn parse_key_pair(kem: Kem, pem_data: &str) -> Res<(PrivateKey, PublicKey)> {
+    // Parse PEM data
+    let pem = ::pem::parse(pem_data)?;
+    let pkcs8_bytes = pem.into_contents();
+
+    // Parse PKCS#8 data to get the private key
+    let pkcs8_key = ::pkcs8::PrivateKeyInfo::try_from(pkcs8_bytes.as_slice())?;
+
+    let (sk, pk) = match kem {
+        Kem::X25519Sha256 => {
+            if pkcs8_key.algorithm.oid != ObjectIdentifier::new_unwrap("1.3.101.110") {
+                error!("Not an X25519 private key");
+                return Err(Error::InvalidKeyType);
+            }
+
+            // Extract the raw 32-byte X25519 private key from a PKCS#8 structure
+            let [0x04, 0x20, private_key_bytes @ ..] = pkcs8_key.private_key else {
+                error!("Invalid X25519 private key, OCTET STRING expected");
+                return Err(Error::InvalidKeyType);
+            };
+
+            let sk = <X25519HkdfSha256 as KemTrait>::PrivateKey::from_bytes(private_key_bytes)?;
+            let pk = hpke::kem::X25519HkdfSha256::sk_to_pk(&sk);
+            (PrivateKey::X25519(sk), PublicKey::X25519(pk))
+        }
+    };
+    trace!("Parsed key pair: sk={sk:?} pk={pk:?}");
     Ok((sk, pk))
 }
 

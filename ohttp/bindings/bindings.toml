@@ -81,6 +81,8 @@ functions = [
     "SECKEY_DestroyPrivateKey",
     "SECKEY_DestroyPublicKey",
     "SECOID_FindOIDByTag",
+    "PK11_ImportDERPrivateKeyInfoAndReturnKey",
+    "SECKEY_ConvertToPublicKey",
 ]
 enums = [
     "HpkeAeadId",

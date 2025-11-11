@@ -322,6 +322,44 @@ pub fn generate_key_pair(kem: Kem) -> Res<(PrivateKey, PublicKey)> {
     Ok((sk, pk))
 }
 
+/// Parse a key pair from PKCS#8 PEM format for the identified KEM.
+#[allow(clippy::unnecessary_wraps)]
+pub fn parse_key_pair(kem: Kem, pem_data: &str) -> Res<(PrivateKey, PublicKey)> {
+    assert_eq!(kem, Kem::X25519Sha256);
+
+    // Parse PEM data to get PKCS#8 bytes
+    let pem = ::pem::parse(pem_data)?;
+    let pkcs8_bytes = pem.into_contents();
+
+    // Import private key from PKCS#8 format
+    let slot = Slot::internal()?;
+    let mut pkcs8_item = Item::wrap(&pkcs8_bytes);
+    let mut private_key_ptr: *mut sys::SECKEYPrivateKey = null_mut();
+
+    secstatus_to_res(unsafe {
+        sys::PK11_ImportDERPrivateKeyInfoAndReturnKey(
+            slot.ptr(),
+            &raw mut pkcs8_item,
+            null_mut(),
+            null_mut(),
+            false.into(),
+            false.into(),
+            sys::CKF_DERIVE,
+            &raw mut private_key_ptr,
+            null_mut(),
+        )
+    })?;
+
+    let sk = PrivateKey::from_ptr(private_key_ptr)?;
+
+    // Derive public key from private key
+    let public_key_ptr = unsafe { sys::SECKEY_ConvertToPublicKey(sk.ptr()) };
+    let pk = PublicKey::from_ptr(public_key_ptr)?;
+
+    trace!("Parsed key pair: sk={sk:?} pk={pk:?}");
+    Ok((sk, pk))
+}
+
 #[cfg(test)]
 mod test {
     use super::{generate_key_pair, Config, HpkeContext, HpkeR, HpkeS};
