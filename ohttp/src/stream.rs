@@ -597,6 +597,73 @@ impl ChunkReader {
     }
 }
 
+impl crate::Server {
+    pub async fn decode_header<S: futures::AsyncRead + std::marker::Unpin>(
+        mut src: S,
+    ) -> Res<HeaderDecodedServerRequest<S>> {
+        use crate::stream::ioerror;
+        use crate::stream::ChunkReader;
+        use crate::stream::ServerRequestState;
+        use byteorder::ReadBytesExt as _;
+        // use std::pin::Pin;
+        use std::task::Context;
+        use std::task::Poll;
+
+        let (key_id, state) = {
+            let mut src = std::pin::pin!(&mut src);
+
+            let func = |cx: &mut Context<'_>| -> std::task::Poll<std::io::Result<(KeyId, ServerRequestState)>> {
+                let mut buf: [u8; 7] = Default::default();
+                let mut read: usize = 0;
+
+
+                let res = ChunkReader::read_fixed(src.as_mut(), cx, &mut buf[..], &mut read);
+                if let Some(res) = res {
+                    return match res {
+                        Poll::Ready(Err(e)) => ioerror(e),
+                        Poll::Ready(Ok(_)) | Poll::Pending => Poll::Pending,
+                    };
+                }
+                let r = &mut Cursor::new(&buf[..]);
+                let key_id = match r.read_u8() {
+                    Ok(key_id) => key_id,
+                    Err(e) => return ioerror(e),
+                };
+
+                Poll::Ready(Ok((key_id, ServerRequestState::HpkeConfig {
+                    buf,
+                    read,
+                })))
+            };
+
+            std::future::poll_fn(func).await?
+        };
+
+        Ok(HeaderDecodedServerRequest { key_id, src, state })
+    }
+}
+pub struct HeaderDecodedServerRequest<S> {
+    key_id: KeyId,
+    src: S,
+    state: ServerRequestState,
+}
+
+impl<S> HeaderDecodedServerRequest<S> {
+    pub fn key_id(&self) -> KeyId {
+        self.key_id
+    }
+
+    pub fn into_server_request(self, key_config: KeyConfig) -> ServerRequest<S> {
+        assert!(key_config.sk.is_some());
+        ServerRequest {
+            src: self.src,
+            key_config,
+            enc: Vec::new(),
+            state: self.state,
+        }
+    }
+}
+
 enum ServerRequestState {
     HpkeConfig {
         buf: [u8; 7],
@@ -1190,5 +1257,61 @@ mod test {
         trace!("Encapsulated Request: {}", hex::encode(&enc_request)); // The server receives a request.
         let mut server_request = server.decapsulate_stream(&enc_request[..]);
         assert_eq!(server_request.sync_read_to_end(), LONG_REQUEST);
+    }
+
+    /// Run the `request_response` test, but do it with streams that are one byte apiece
+    /// on the input side.  This is the one that produces the most output.
+    #[test]
+    fn check_key_id() {
+        init();
+
+        let server_config = make_config();
+        let encoded_config = server_config.encode().unwrap();
+        trace!("Config: {}", hex::encode(&encoded_config));
+
+        // The client sends a request.
+        let client = ClientRequest::from_encoded_config(&encoded_config).unwrap();
+        let (mut request_read, request_write) = Pipe::new();
+        let client_request = client.encapsulate_stream(request_write).unwrap();
+        let client_request = write_wrapped(
+            client_request,
+            |s| SplitAt::new(s, REQUEST.len() / 2),
+            REQUEST,
+        );
+
+        trace!("Request: {}", hex::encode(REQUEST));
+        let enc_request = request_read.sync_read_to_end();
+        trace!("Encapsulated Request: {}", hex::encode(&enc_request));
+
+        // The server receives a request.
+        let enc_req_stream = &enc_request[..];
+
+        // decode the header and check the key id
+        let server_request = {
+            let future = Server::decode_header(enc_req_stream);
+            let header_decoded = std::pin::pin!(future).sync_resolve().unwrap();
+            assert_eq!(header_decoded.key_id(), server_config.key_id);
+            header_decoded.into_server_request(server_config)
+        };
+        let (request_data, server_request) = read_wrapped(server_request, Stutter::new);
+        assert_eq!(request_data, REQUEST);
+
+        // The server sends a response.
+        let (mut response_read, response_write) = Pipe::new();
+        let server_response = server_request.response(response_write).unwrap();
+        _ = write_wrapped(
+            server_response,
+            |s| SplitAt::new(s, RESPONSE.len() / 2),
+            RESPONSE,
+        );
+
+        let enc_response = response_read.sync_read_to_end();
+        trace!("Encapsulated Response: {}", hex::encode(&enc_response));
+
+        // The client receives a response.
+        let client_response = client_request.response(&enc_response[..]).unwrap();
+        let (response_data, _) = read_wrapped(client_response, Stutter::new);
+        assert_eq!(response_data, RESPONSE);
+        trace!("Response: {}", hex::encode(response_data));
     }
 }
