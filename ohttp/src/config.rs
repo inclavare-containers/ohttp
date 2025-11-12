@@ -295,6 +295,10 @@ impl KeyConfig {
         let hpke_config = HpkeConfig::new(self.kem, kdf_id, aead_id);
         Ok(hpke_config)
     }
+
+    pub fn key_id(&self) -> KeyId {
+        self.key_id
+    }
 }
 
 impl AsRef<Self> for KeyConfig {
