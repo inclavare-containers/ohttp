@@ -82,6 +82,7 @@ functions = [
     "SECKEY_DestroyPublicKey",
     "SECOID_FindOIDByTag",
     "PK11_ImportDERPrivateKeyInfoAndReturnKey",
+    "PK11_ExportDERPrivateKeyInfo",
     "SECKEY_ConvertToPublicKey",
 ]
 enums = [

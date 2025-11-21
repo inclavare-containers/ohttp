@@ -3,7 +3,7 @@ use std::ops::Deref;
 use ::hpke as rust_hpke;
 use ::rand::rng;
 use log::{error, trace};
-use pkcs8::ObjectIdentifier;
+use pkcs8::{der::Encode, spki::AlgorithmIdentifier, ObjectIdentifier, PrivateKeyInfo};
 use rust_hpke::{
     aead::{AeadCtxR, AeadCtxS, AeadTag, AesGcm128, ChaCha20Poly1305},
     kdf::HkdfSha256,
@@ -107,6 +107,47 @@ impl std::fmt::Debug for PrivateKey {
             }
         }
         write!(f, "Opaque PrivateKey")
+    }
+}
+
+impl PrivateKey {
+    /// Serialize a key pair to PKCS#8 PEM format for the identified KEM.
+    ///
+    /// Note: The resulting PKCS#8 structure does **not** include the public key.
+    pub fn serialize_to_pkcs8_pem(&self) -> Res<String> {
+        match self {
+            PrivateKey::X25519(sk) => {
+                // Step 1: Build AlgorithmIdentifier for X25519
+                let alg_id = AlgorithmIdentifier {
+                    oid: ObjectIdentifier::new_unwrap("1.3.101.110"), // X25519 OID
+                    parameters: None,
+                };
+
+                // Step 2: Encode raw private key as OCTET STRING: [0x04, 0x20 || bytes]
+                let mut private_key_bytes = Vec::with_capacity(34);
+                private_key_bytes.push(0x04); // OCTET STRING tag
+                private_key_bytes.push(0x20); // length = 32 bytes
+                private_key_bytes.extend_from_slice(&sk.to_bytes());
+
+                // Step 3: Construct PKCS#8 PrivateKeyInfo
+                let pkcs8_info = PrivateKeyInfo {
+                    algorithm: alg_id,
+                    private_key: &private_key_bytes,
+                    public_key: None,
+                };
+
+                // Step 4: Convert to DER
+                let der_bytes = pkcs8_info.to_der().map_err(Error::PrivateKeySerialize)?;
+
+                // Step 5: Wrap in PEM
+                let pem = ::pem::Pem::new("PRIVATE KEY", der_bytes);
+
+                Ok(::pem::encode_config(
+                    &pem,
+                    pem::EncodeConfig::new().set_line_ending(pem::LineEnding::LF),
+                ))
+            }
+        }
     }
 }
 

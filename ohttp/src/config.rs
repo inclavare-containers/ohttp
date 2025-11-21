@@ -299,6 +299,16 @@ impl KeyConfig {
     pub fn key_id(&self) -> KeyId {
         self.key_id
     }
+
+    pub fn kem(&self) -> Kem {
+        self.kem
+    }
+    pub fn symmetric(&self) -> &[SymmetricSuite] {
+        &self.symmetric
+    }
+    pub fn dangerous_sk(&self) -> Option<&PrivateKey> {
+        self.sk.as_ref()
+    }
 }
 
 impl AsRef<Self> for KeyConfig {
@@ -414,18 +424,35 @@ mod test {
         assert!(matches!(KeyConfig::decode(&x25519), Err(Error::Format)));
     }
 
+    const PEM_DATA: &str = "-----BEGIN PRIVATE KEY-----
+MC4CAQAwBQYDK2VuBCIEIAgFWQfJv7DnZqs7W/aHM+aa5kXnFTlLQAso2qIAJyVT
+-----END PRIVATE KEY-----
+";
     #[test]
     fn create_from_pkcs8_pem() {
         init();
 
-        let pem_data = "-----BEGIN PRIVATE KEY-----
-MC4CAQAwBQYDK2VuBCIEIAgFWQfJv7DnZqs7W/aHM+aa5kXnFTlLQAso2qIAJyVT
------END PRIVATE KEY-----";
         let config =
-            KeyConfig::new_from_pkcs8_pem(KEY_ID, KEM, Vec::from(SYMMETRIC), pem_data).unwrap();
+            KeyConfig::new_from_pkcs8_pem(KEY_ID, KEM, Vec::from(SYMMETRIC), PEM_DATA).unwrap();
         assert_eq!(config.key_id, KEY_ID);
         assert_eq!(config.kem, KEM);
         config.pk.key_data().unwrap();
         assert!(config.sk.is_some());
+    }
+
+    #[test]
+    fn export_private_key_to_pkcs8_pem() {
+        init();
+
+        let config =
+            KeyConfig::new_from_pkcs8_pem(KEY_ID, KEM, Vec::from(SYMMETRIC), PEM_DATA).unwrap();
+
+        let exported_pem_data = config
+            .dangerous_sk()
+            .unwrap()
+            .serialize_to_pkcs8_pem()
+            .unwrap();
+
+        assert_eq!(exported_pem_data, PEM_DATA);
     }
 }

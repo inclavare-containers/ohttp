@@ -13,7 +13,7 @@ use std::{
 };
 
 use crate::{
-    err::{Error, Res},
+    err::Res,
     nss::err::{secstatus_to_res, Error as NssError},
 };
 
@@ -74,10 +74,6 @@ scoped_ptr!(PrivateKey, SECKEYPrivateKey, SECKEY_DestroyPrivateKey);
 
 impl PrivateKey {
     fn key_data(&self) -> Res<Vec<u8>> {
-        if !cfg!(feature = "unsafe-print-secrets") {
-            return Err(Error::from(NssError::internal()));
-        }
-
         let mut key_item = SECItem {
             type_: SECItemType::siBuffer,
             data: null_mut(),
@@ -116,11 +112,42 @@ impl Clone for PrivateKey {
 
 impl std::fmt::Debug for PrivateKey {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        if let Ok(b) = self.key_data() {
-            write!(f, "PrivateKey {}", hex::encode(b))
-        } else {
-            write!(f, "Opaque PrivateKey")
+        if cfg!(feature = "unsafe-print-secrets") {
+            if let Ok(b) = self.key_data() {
+                return write!(f, "PrivateKey {}", hex::encode(b));
+            }
         }
+        write!(f, "Opaque PrivateKey")
+    }
+}
+
+scoped_ptr!(ScopedSECItem, SECItem, destroy_secitem);
+
+impl PrivateKey {
+    /// Serialize a key pair to PKCS#8 PEM format for the identified KEM.
+    ///
+    /// Note: The resulting PKCS#8 structure does **not** include the public key.
+    pub fn serialize_to_pkcs8_pem(&self) -> Res<String> {
+        let der_bytes = {
+            let pkcs8_priv_item = ScopedSECItem::from_ptr(unsafe {
+                sys::PK11_ExportDERPrivateKeyInfo(self.ptr(), ptr::null_mut())
+            })?;
+            unsafe {
+                std::slice::from_raw_parts(
+                    (*pkcs8_priv_item.ptr()).data,
+                    (*pkcs8_priv_item.ptr()).len as usize,
+                )
+            }
+            .to_vec()
+        };
+
+        // Encode to PEM
+        let pem = ::pem::Pem::new("PRIVATE KEY", der_bytes);
+
+        Ok(::pem::encode_config(
+            &pem,
+            pem::EncodeConfig::new().set_line_ending(pem::LineEnding::LF),
+        ))
     }
 }
 

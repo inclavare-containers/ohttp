@@ -46,6 +46,8 @@ pub enum Error {
     #[cfg(feature = "rust-hpke")]
     #[error("invalid PKCS#8 data")]
     InvalidPkcs8(#[from] pkcs8::Error),
+    #[error("an error occurred during serialize private key")]
+    PrivateKeySerialize(#[source] pkcs8::der::Error),
 }
 
 impl From<std::num::TryFromIntError> for Error {
