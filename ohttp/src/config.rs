@@ -300,6 +300,10 @@ impl KeyConfig {
         self.key_id
     }
 
+    pub fn pk_data(&self) -> Res<Vec<u8>> {
+        self.pk.key_data()
+    }
+
     pub fn kem(&self) -> Kem {
         self.kem
     }
