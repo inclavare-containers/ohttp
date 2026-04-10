@@ -153,8 +153,10 @@ impl<D: AsyncWrite, C: Encrypt> AsyncWrite for ChunkWriter<D, C> {
 
         // We have buffered data, so dump it into the output directly.
         let flushed = Self::flush(&mut this, cx);
-        if matches!(flushed, Poll::Pending | Poll::Ready(Err(_))) {
-            return flushed.map(|_| unreachable!());
+        match flushed {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            _ => { /* Do nothing */ }
         }
 
         // Now encipher a chunk.
@@ -165,10 +167,10 @@ impl<D: AsyncWrite, C: Encrypt> AsyncWrite for ChunkWriter<D, C> {
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
         let mut this = self.project();
         let flushed = Self::flush(&mut this, cx);
-        if matches!(flushed, Poll::Pending | Poll::Ready(Err(_))) {
-            flushed.map(|_| unreachable!())
-        } else {
-            this.dst.as_mut().poll_flush(cx)
+        match flushed {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            _ => this.dst.as_mut().poll_flush(cx),
         }
     }
 
