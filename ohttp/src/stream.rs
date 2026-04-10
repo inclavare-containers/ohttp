@@ -376,6 +376,11 @@ impl ChunkReader {
             return None;
         };
 
+        if *offset != 0 {
+            // we have already read the first byte, in this way we have set `offset` to >= 1.
+            return None;
+        }
+
         let res = Self::read_fixed(src.as_mut(), cx, &mut len[..1], offset);
         if res.is_some() {
             return res;
@@ -546,18 +551,25 @@ impl ChunkReader {
                 buf.resize(sz, 0);
             }
 
-            match src.as_mut().poll_read(cx, &mut buf[*offset..]) {
+            let expected_chunk_ct_len = if last {
+                cipher.alg().n_t() /* when it is last chunk, the cipher text is only the tag with empty plaintext */
+            } else {
+                *length
+            };
+
+            match src
+                .as_mut()
+                .poll_read(cx, &mut buf[*offset..expected_chunk_ct_len])
+            {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Ok(0)) => {
-                    if last {
-                        buf.truncate(*offset);
-                    } else {
+                    if *offset < expected_chunk_ct_len {
                         return ioerror(Error::Truncated);
                     }
                 }
                 Poll::Ready(Ok(r)) => {
                     *offset += r;
-                    if last || *offset < *length {
+                    if *offset < expected_chunk_ct_len {
                         continue; // Keep reading
                     }
                 }
@@ -565,7 +577,9 @@ impl ChunkReader {
             }
 
             let aad = if last { FINAL_CHUNK_AAD } else { CHUNK_AAD };
-            let pt = cipher.open(aad, buf).map_err(IoError::other)?;
+            let pt = cipher
+                .open(aad, &buf[..expected_chunk_ct_len])
+                .map_err(IoError::other)?;
 
             let delivered = if pt.len() > output.len() {
                 output.copy_from_slice(&pt[..output.len()]);
