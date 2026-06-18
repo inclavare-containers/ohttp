@@ -11,6 +11,11 @@ use std::{
 use futures::{AsyncRead, AsyncWrite};
 use pin_project::pin_project;
 
+use crate::hpke::Aead as AeadId;
+#[cfg(feature = "nss")]
+use crate::nss::hpke::Exporter;
+#[cfg(feature = "rust-hpke")]
+use crate::rh::hpke::Exporter;
 use crate::{
     build_info,
     crypto::{Decrypt, Encrypt},
@@ -19,6 +24,8 @@ use crate::{
     export_secret, make_aead, random, Aead, Error, HpkeConfig, HpkeR, HpkeS, KeyConfig, KeyId,
     Mode, PublicKey, SymKey, REQUEST_HEADER_LEN,
 };
+#[cfg(feature = "rust-hpke")]
+use crate::{AuthHpkeR, AuthHpkeS, PrivateKey};
 
 /// The info string for a chunked request.
 pub(crate) const INFO_REQUEST: &[u8] = b"message/bhttp chunked request";
@@ -29,6 +36,99 @@ const MAX_CHUNK_PLAINTEXT: usize = 1 << 14;
 const CHUNK_AAD: &[u8] = b"";
 const FINAL_CHUNK_AAD: &[u8] = b"final";
 const MAX_ENTROPY_LEN: usize = 32;
+
+enum AnySenderCipher {
+    Base(HpkeS),
+    #[cfg(feature = "rust-hpke")]
+    Auth(AuthHpkeS),
+}
+
+impl AnySenderCipher {
+    fn config(&self) -> HpkeConfig {
+        match self {
+            AnySenderCipher::Base(s) => s.config(),
+            #[cfg(feature = "rust-hpke")]
+            AnySenderCipher::Auth(s) => s.config(),
+        }
+    }
+    fn enc(&self) -> Res<Vec<u8>> {
+        match self {
+            AnySenderCipher::Base(s) => s.enc(),
+            #[cfg(feature = "rust-hpke")]
+            AnySenderCipher::Auth(s) => s.enc(),
+        }
+    }
+}
+
+impl Encrypt for AnySenderCipher {
+    fn seal(&mut self, aad: &[u8], pt: &[u8]) -> Res<Vec<u8>> {
+        match self {
+            AnySenderCipher::Base(s) => s.seal(aad, pt),
+            #[cfg(feature = "rust-hpke")]
+            AnySenderCipher::Auth(s) => s.seal(aad, pt),
+        }
+    }
+    fn alg(&self) -> AeadId {
+        match self {
+            AnySenderCipher::Base(s) => s.alg(),
+            #[cfg(feature = "rust-hpke")]
+            AnySenderCipher::Auth(s) => s.alg(),
+        }
+    }
+}
+
+impl Exporter for AnySenderCipher {
+    fn export(&self, info: &[u8], len: usize) -> Res<SymKey> {
+        match self {
+            AnySenderCipher::Base(s) => s.export(info, len),
+            #[cfg(feature = "rust-hpke")]
+            AnySenderCipher::Auth(s) => s.export(info, len),
+        }
+    }
+}
+
+enum AnyReceiverCipher {
+    Base(HpkeR),
+    #[cfg(feature = "rust-hpke")]
+    Auth(AuthHpkeR),
+}
+
+impl AnyReceiverCipher {
+    fn config(&self) -> HpkeConfig {
+        match self {
+            AnyReceiverCipher::Base(r) => r.config(),
+            #[cfg(feature = "rust-hpke")]
+            AnyReceiverCipher::Auth(r) => r.config(),
+        }
+    }
+}
+
+impl Decrypt for AnyReceiverCipher {
+    fn open(&mut self, aad: &[u8], ct: &[u8]) -> Res<Vec<u8>> {
+        match self {
+            AnyReceiverCipher::Base(r) => r.open(aad, ct),
+            #[cfg(feature = "rust-hpke")]
+            AnyReceiverCipher::Auth(r) => r.open(aad, ct),
+        }
+    }
+    fn alg(&self) -> AeadId {
+        match self {
+            AnyReceiverCipher::Base(r) => r.alg(),
+            #[cfg(feature = "rust-hpke")]
+            AnyReceiverCipher::Auth(r) => r.alg(),
+        }
+    }
+}
+
+impl Exporter for AnyReceiverCipher {
+    fn export(&self, info: &[u8], len: usize) -> Res<SymKey> {
+        match self {
+            AnyReceiverCipher::Base(r) => r.export(info, len),
+            #[cfg(feature = "rust-hpke")]
+            AnyReceiverCipher::Auth(r) => r.export(info, len),
+        }
+    }
+}
 
 #[allow(clippy::unnecessary_wraps)]
 fn ioerror<T, E>(e: E) -> Poll<IoResult<T>>
@@ -200,7 +300,7 @@ impl<D: AsyncWrite, C: Encrypt> AsyncWrite for ChunkWriter<D, C> {
 #[pin_project(project = ClientProjection)]
 pub struct ClientRequest<D> {
     #[pin]
-    writer: ChunkWriter<D, HpkeS>,
+    writer: ChunkWriter<D, AnySenderCipher>,
 }
 
 impl<D> ClientRequest<D> {
@@ -218,7 +318,35 @@ impl<D> ClientRequest<D> {
         Ok(Self {
             writer: ChunkWriter {
                 dst,
-                cipher: hpke,
+                cipher: AnySenderCipher::Base(hpke),
+                buf: header,
+                closed: false,
+            },
+        })
+    }
+
+    /// Start with client private key for Auth mode.
+    #[cfg(feature = "rust-hpke")]
+    pub fn start_with_client_key(
+        dst: D,
+        config: HpkeConfig,
+        key_id: KeyId,
+        pk: &PublicKey,
+        sk_s: &PrivateKey,
+    ) -> Res<Self> {
+        let info = build_info(INFO_REQUEST, key_id, config)?;
+        let hpke = AuthHpkeS::new(config, pk, sk_s, &info)?;
+
+        let mut header = Vec::from(&info[INFO_REQUEST.len() + 1..]);
+        debug_assert_eq!(header.len(), REQUEST_HEADER_LEN);
+
+        let mut e = hpke.enc()?;
+        header.append(&mut e);
+
+        Ok(Self {
+            writer: ChunkWriter {
+                dst,
+                cipher: AnySenderCipher::Auth(hpke),
                 buf: header,
                 closed: false,
             },
@@ -664,6 +792,15 @@ pub struct HeaderDecodedServerRequest<S> {
     state: ServerRequestState,
 }
 
+impl ServerRequestState {
+    fn into_hpke_config_buf_read(self) -> ([u8; 7], usize) {
+        match self {
+            ServerRequestState::HpkeConfig { buf, read } => (buf, read),
+            _ => ([0; 7], 0),
+        }
+    }
+}
+
 impl<S> HeaderDecodedServerRequest<S> {
     pub fn key_id(&self) -> KeyId {
         self.key_id
@@ -671,11 +808,30 @@ impl<S> HeaderDecodedServerRequest<S> {
 
     pub fn into_server_request(self, key_config: KeyConfig) -> ServerRequest<S> {
         assert!(key_config.sk.is_some());
+        let (buf, read) = self.state.into_hpke_config_buf_read();
         ServerRequest {
             src: self.src,
             key_config,
             enc: Vec::new(),
-            state: self.state,
+            state: ServerRequestState::HpkeConfig { buf, read },
+            client_pk: None,
+        }
+    }
+
+    #[cfg(feature = "rust-hpke")]
+    pub fn into_server_request_with_client_pk(
+        self,
+        key_config: KeyConfig,
+        client_pk: PublicKey,
+    ) -> ServerRequest<S> {
+        assert!(key_config.sk.is_some());
+        let (buf, read) = self.state.into_hpke_config_buf_read();
+        ServerRequest {
+            src: self.src,
+            key_config,
+            enc: Vec::new(),
+            state: ServerRequestState::HpkeConfig { buf, read },
+            client_pk: Some(client_pk),
         }
     }
 }
@@ -689,9 +845,10 @@ enum ServerRequestState {
         config: HpkeConfig,
         info: Vec<u8>,
         read: usize,
+        client_pk: Option<PublicKey>,
     },
     Body {
-        hpke: HpkeR,
+        hpke: AnyReceiverCipher,
         state: ChunkReader,
     },
 }
@@ -703,6 +860,7 @@ pub struct ServerRequest<S> {
     key_config: KeyConfig,
     enc: Vec<u8>,
     state: ServerRequestState,
+    client_pk: Option<PublicKey>,
 }
 
 impl<S> ServerRequest<S> {
@@ -715,6 +873,22 @@ impl<S> ServerRequest<S> {
                 buf: [0; 7],
                 read: 0,
             },
+            client_pk: None,
+        }
+    }
+
+    /// Create a new server request with a client public key for Auth mode.
+    #[cfg(feature = "rust-hpke")]
+    pub fn new_with_client_pk(key_config: KeyConfig, src: S, client_pk: PublicKey) -> Self {
+        Self {
+            src,
+            key_config,
+            enc: Vec::new(),
+            state: ServerRequestState::HpkeConfig {
+                buf: [0; 7],
+                read: 0,
+            },
+            client_pk: Some(client_pk),
         }
     }
 
@@ -821,6 +995,7 @@ impl<S: AsyncRead> ServerRequest<S> {
             config,
             info,
             read: 0,
+            client_pk: this.client_pk.clone(),
         };
         None
     }
@@ -829,7 +1004,13 @@ impl<S: AsyncRead> ServerRequest<S> {
         this: &mut ServerRequestProjection<'_, S>,
         cx: &mut Context<'_>,
     ) -> Option<Poll<IoResult<usize>>> {
-        let ServerRequestState::Enc { config, info, read } = this.state else {
+        let ServerRequestState::Enc {
+            config,
+            info,
+            read,
+            client_pk,
+        } = this.state
+        else {
             return None;
         };
 
@@ -838,6 +1019,36 @@ impl<S: AsyncRead> ServerRequest<S> {
             return res;
         }
 
+        #[cfg(feature = "rust-hpke")]
+        let hpke = match client_pk {
+            Some(pk_s) => {
+                match AuthHpkeR::new(
+                    *config,
+                    &this.key_config.pk,
+                    this.key_config.sk.as_ref().unwrap(),
+                    pk_s,
+                    this.enc,
+                    info,
+                ) {
+                    Ok(hpke) => AnyReceiverCipher::Auth(hpke),
+                    Err(e) => return Some(ioerror(e)),
+                }
+            }
+            None => {
+                match HpkeR::new(
+                    *config,
+                    &this.key_config.pk,
+                    this.key_config.sk.as_ref().unwrap(),
+                    this.enc,
+                    info,
+                ) {
+                    Ok(hpke) => AnyReceiverCipher::Base(hpke),
+                    Err(e) => return Some(ioerror(e)),
+                }
+            }
+        };
+
+        #[cfg(not(feature = "rust-hpke"))]
         let hpke = match HpkeR::new(
             *config,
             &this.key_config.pk,
@@ -845,7 +1056,7 @@ impl<S: AsyncRead> ServerRequest<S> {
             this.enc,
             info,
         ) {
-            Ok(hpke) => hpke,
+            Ok(hpke) => AnyReceiverCipher::Base(hpke),
             Err(e) => return Some(ioerror(e)),
         };
 

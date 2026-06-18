@@ -113,10 +113,7 @@ impl ClientRequest {
     }
 
     /// Construct a ClientRequest that uses HPKE Auth mode with the given client private key.
-    pub fn from_config_with_client_key(
-        config: &mut KeyConfig,
-        client_sk: PrivateKey,
-    ) -> Res<Self> {
+    pub fn from_config_with_client_key(config: &mut KeyConfig, client_sk: PrivateKey) -> Res<Self> {
         let selected = config.select(config.symmetric[0])?;
         Ok(Self {
             key_id: config.key_id,
@@ -183,6 +180,19 @@ impl ClientRequest {
 
     #[cfg(feature = "stream")]
     pub fn encapsulate_stream<S>(self, dst: S) -> Res<StreamClient<S>> {
+        #[cfg(feature = "rust-hpke")]
+        match self.sk_s {
+            Some(sk_s) => {
+                return StreamClient::start_with_client_key(
+                    dst,
+                    self.config,
+                    self.key_id,
+                    &self.pk,
+                    &sk_s,
+                );
+            }
+            None => {}
+        }
         StreamClient::start(dst, self.config, self.key_id, &self.pk)
     }
 }
@@ -294,6 +304,16 @@ impl Server {
     #[cfg(feature = "stream")]
     pub fn decapsulate_stream<S>(&self, src: S) -> ServerRequestStream<S> {
         ServerRequestStream::new(self.config.clone(), src)
+    }
+
+    /// Remove encapsulation on a streamed request using HPKE Auth mode.
+    #[cfg(all(feature = "stream", feature = "rust-hpke"))]
+    pub fn decapsulate_stream_with_client_pk<S>(
+        &self,
+        src: S,
+        client_pk: &PublicKey,
+    ) -> ServerRequestStream<S> {
+        ServerRequestStream::new_with_client_pk(self.config.clone(), src, client_pk.clone())
     }
 }
 
