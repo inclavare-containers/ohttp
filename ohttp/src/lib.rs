@@ -692,4 +692,90 @@ mod test {
         let response = client_response.decapsulate(&enc_response).unwrap();
         assert_eq!(&response[..], RESPONSE);
     }
+
+    #[test]
+    fn request_response_auth_mode() {
+        init();
+
+        let server_config = make_config();
+        let server = Server::new(server_config).unwrap();
+        let encoded_config = server.config().encode().unwrap();
+
+        // Generate client key pair
+        let (client_sk, client_pk) = crate::rh::hpke::generate_key_pair(KEM).unwrap();
+
+        let mut config = KeyConfig::decode(&encoded_config).unwrap();
+        let client = ClientRequest::from_config_with_client_key(&mut config, client_sk).unwrap();
+        let (enc_request, client_response) = client.encapsulate(REQUEST).unwrap();
+
+        // Server decapsulates with client's public key
+        let (request, server_response) = server
+            .decapsulate_with_client_pk(&enc_request, &client_pk)
+            .unwrap();
+        assert_eq!(&request[..], REQUEST);
+
+        let enc_response = server_response.encapsulate(RESPONSE).unwrap();
+        let response = client_response.decapsulate(&enc_response).unwrap();
+        assert_eq!(&response[..], RESPONSE);
+    }
+
+    #[test]
+    fn auth_mode_wrong_client_key_fails() {
+        init();
+
+        let server_config = make_config();
+        let server = Server::new(server_config).unwrap();
+        let encoded_config = server.config().encode().unwrap();
+
+        let (client_sk, _) = crate::rh::hpke::generate_key_pair(KEM).unwrap();
+        let (_, wrong_client_pk) = crate::rh::hpke::generate_key_pair(KEM).unwrap();
+
+        let mut config = KeyConfig::decode(&encoded_config).unwrap();
+        let client = ClientRequest::from_config_with_client_key(&mut config, client_sk).unwrap();
+        let (enc_request, _) = client.encapsulate(REQUEST).unwrap();
+
+        // Decapsulating with wrong client key should fail
+        let result = server.decapsulate_with_client_pk(&enc_request, &wrong_client_pk);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn auth_mode_two_requests() {
+        init();
+
+        let server_config = make_config();
+        let server = Server::new(server_config).unwrap();
+        let encoded_config = server.config().encode().unwrap();
+
+        let (client_sk, client_pk) = crate::rh::hpke::generate_key_pair(KEM).unwrap();
+
+        let mut config1 = KeyConfig::decode(&encoded_config).unwrap();
+        let client1 =
+            ClientRequest::from_config_with_client_key(&mut config1, client_sk.clone()).unwrap();
+        let (enc_request1, client_response1) = client1.encapsulate(REQUEST).unwrap();
+
+        let mut config2 = KeyConfig::decode(&encoded_config).unwrap();
+        let client2 = ClientRequest::from_config_with_client_key(&mut config2, client_sk).unwrap();
+        let (enc_request2, client_response2) = client2.encapsulate(REQUEST).unwrap();
+
+        // Same client key should produce different encapsulated requests (ephemeral)
+        assert_ne!(enc_request1, enc_request2);
+
+        let (request1, server_response1) = server
+            .decapsulate_with_client_pk(&enc_request1, &client_pk)
+            .unwrap();
+        assert_eq!(&request1[..], REQUEST);
+        let (request2, server_response2) = server
+            .decapsulate_with_client_pk(&enc_request2, &client_pk)
+            .unwrap();
+        assert_eq!(&request2[..], REQUEST);
+
+        let enc_response1 = server_response1.encapsulate(RESPONSE).unwrap();
+        let enc_response2 = server_response2.encapsulate(RESPONSE).unwrap();
+
+        let response1 = client_response1.decapsulate(&enc_response1).unwrap();
+        assert_eq!(&response1[..], RESPONSE);
+        let response2 = client_response2.decapsulate(&enc_response2).unwrap();
+        assert_eq!(&response2[..], RESPONSE);
+    }
 }
