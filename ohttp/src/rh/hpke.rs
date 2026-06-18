@@ -496,6 +496,360 @@ impl Deref for HpkeR {
     }
 }
 
+// ── Auth Mode Sender ──────────────────────────────────────────────────
+
+#[allow(dead_code)]
+enum AuthSenderContextX25519HkdfSha256HkdfSha256 {
+    AesGcm128(Box<AeadCtxS<AesGcm128, HkdfSha256, X25519HkdfSha256>>),
+    ChaCha20Poly1305(Box<AeadCtxS<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>>),
+}
+
+#[allow(dead_code)]
+enum AuthSenderContextX25519HkdfSha256 {
+    HkdfSha256(AuthSenderContextX25519HkdfSha256HkdfSha256),
+}
+
+#[allow(dead_code)]
+enum AuthSenderContext {
+    X25519HkdfSha256(AuthSenderContextX25519HkdfSha256),
+}
+
+impl AuthSenderContext {
+    fn seal(&mut self, plaintext: &mut [u8], aad: &[u8]) -> Res<Vec<u8>> {
+        Ok(match self {
+            Self::X25519HkdfSha256(AuthSenderContextX25519HkdfSha256::HkdfSha256(
+                AuthSenderContextX25519HkdfSha256HkdfSha256::AesGcm128(context),
+            )) => {
+                let tag = context.seal_in_place_detached(plaintext, aad)?;
+                Vec::from(tag.to_bytes().as_slice())
+            }
+            Self::X25519HkdfSha256(AuthSenderContextX25519HkdfSha256::HkdfSha256(
+                AuthSenderContextX25519HkdfSha256HkdfSha256::ChaCha20Poly1305(context),
+            )) => {
+                let tag = context.seal_in_place_detached(plaintext, aad)?;
+                Vec::from(tag.to_bytes().as_slice())
+            }
+        })
+    }
+
+    fn export(&self, info: &[u8], out_buf: &mut [u8]) -> Res<()> {
+        match self {
+            Self::X25519HkdfSha256(AuthSenderContextX25519HkdfSha256::HkdfSha256(
+                AuthSenderContextX25519HkdfSha256HkdfSha256::AesGcm128(context),
+            )) => {
+                context.export(info, out_buf)?;
+            }
+            Self::X25519HkdfSha256(AuthSenderContextX25519HkdfSha256::HkdfSha256(
+                AuthSenderContextX25519HkdfSha256HkdfSha256::ChaCha20Poly1305(context),
+            )) => {
+                context.export(info, out_buf)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// HPKE sender context for Auth mode.
+///
+/// Unlike [`HpkeS`] which uses Base mode, this incorporates the sender's
+/// public key into the KDF, enabling the receiver to authenticate the sender.
+#[allow(dead_code)]
+#[allow(clippy::module_name_repetitions)]
+pub struct AuthHpkeS {
+    context: AuthSenderContext,
+    enc: Vec<u8>,
+    config: Config,
+}
+
+#[allow(dead_code)]
+impl AuthHpkeS {
+    /// Create a new Auth-mode sender context.
+    ///
+    /// Derives the sender public key from `sk_s` and uses `OpModeS::Auth(pk_s)`.
+    pub fn new(config: Config, pk_r: &PublicKey, sk_s: &PrivateKey, info: &[u8]) -> Res<Self> {
+        let mut csprng = rng();
+
+        macro_rules! dispatch_auth_hpkes_new {
+            {
+                ($c:expr, $pk:expr, $sk:expr, $csprng:expr): [$( $(#[$meta:meta])* {
+                    $kemid:path => $kem:path,
+                    $kdfid:path => $kdf:path,
+                    $aeadid:path => $aead:path,
+                    $pke:path, $ske:path, $ctxt1:path, $ctxt2:path, $ctxt3:path $(,)?
+                }),* $(,)?]
+            } => {
+                match ($c, $pk, $sk) {
+                    $(
+                        $(#[$meta])*
+                        (
+                            Config { kem: $kemid, kdf: $kdfid, aead: $aeadid },
+                            $pke(pk_r),
+                            $ske(sk_s),
+                        ) => {
+                            let pk_s = <$kem as KemTrait>::sk_to_pk(sk_s);
+                            let (enc, context) = setup_sender::<$aead, $kdf, $kem, _>(
+                                &OpModeS::Auth((sk_s.clone(), pk_s)),
+                                pk_r,
+                                info,
+                                $csprng,
+                            )?;
+                            (
+                                $ctxt1($ctxt2($ctxt3(Box::new(context)))),
+                                Vec::from(enc.to_bytes().as_slice()),
+                            )
+                        }
+                    )*
+                    _ => return Err(Error::InvalidKeyType),
+                }
+            };
+        }
+
+        let (context, enc) = dispatch_auth_hpkes_new! { (config, pk_r, sk_s, &mut csprng): [
+            {
+                Kem::X25519Sha256 => X25519HkdfSha256,
+                Kdf::HkdfSha256 => HkdfSha256,
+                Aead::Aes128Gcm => AesGcm128,
+                PublicKey::X25519,
+                PrivateKey::X25519,
+                AuthSenderContext::X25519HkdfSha256,
+                AuthSenderContextX25519HkdfSha256::HkdfSha256,
+                AuthSenderContextX25519HkdfSha256HkdfSha256::AesGcm128,
+            },
+            {
+                Kem::X25519Sha256 => X25519HkdfSha256,
+                Kdf::HkdfSha256 => HkdfSha256,
+                Aead::ChaCha20Poly1305 => ChaCha20Poly1305,
+                PublicKey::X25519,
+                PrivateKey::X25519,
+                AuthSenderContext::X25519HkdfSha256,
+                AuthSenderContextX25519HkdfSha256::HkdfSha256,
+                AuthSenderContextX25519HkdfSha256HkdfSha256::ChaCha20Poly1305,
+            },
+        ]};
+
+        Ok(Self { context, enc, config })
+    }
+
+    pub fn config(&self) -> Config {
+        self.config
+    }
+
+    /// Get the encapsulated KEM secret.
+    #[allow(clippy::unnecessary_wraps)]
+    pub fn enc(&self) -> Res<Vec<u8>> {
+        Ok(self.enc.clone())
+    }
+}
+
+impl Encrypt for AuthHpkeS {
+    fn seal(&mut self, aad: &[u8], pt: &[u8]) -> Res<Vec<u8>> {
+        let mut buf = pt.to_owned();
+        let mut tag = self.context.seal(&mut buf, aad)?;
+        buf.append(&mut tag);
+        Ok(buf)
+    }
+
+    fn alg(&self) -> Aead {
+        self.config.aead()
+    }
+}
+
+impl Exporter for AuthHpkeS {
+    fn export(&self, info: &[u8], len: usize) -> Res<SymKey> {
+        let mut buf = vec![0; len];
+        self.context.export(info, &mut buf)?;
+        Ok(SymKey::from(buf))
+    }
+}
+
+impl Deref for AuthHpkeS {
+    type Target = Config;
+    fn deref(&self) -> &Self::Target {
+        &self.config
+    }
+}
+
+// ── Auth Mode Receiver ────────────────────────────────────────────────
+
+#[allow(dead_code)]
+enum AuthReceiverContextX25519HkdfSha256HkdfSha256 {
+    AesGcm128(Box<AeadCtxR<AesGcm128, HkdfSha256, X25519HkdfSha256>>),
+    ChaCha20Poly1305(Box<AeadCtxR<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>>),
+}
+
+#[allow(dead_code)]
+enum AuthReceiverContextX25519HkdfSha256 {
+    HkdfSha256(AuthReceiverContextX25519HkdfSha256HkdfSha256),
+}
+
+#[allow(dead_code)]
+enum AuthReceiverContext {
+    X25519HkdfSha256(AuthReceiverContextX25519HkdfSha256),
+}
+
+impl AuthReceiverContext {
+    fn open<'a>(&mut self, ciphertext: &'a mut [u8], aad: &[u8]) -> Res<&'a [u8]> {
+        Ok(match self {
+            Self::X25519HkdfSha256(AuthReceiverContextX25519HkdfSha256::HkdfSha256(
+                AuthReceiverContextX25519HkdfSha256HkdfSha256::AesGcm128(context),
+            )) => {
+                if ciphertext.len() < AeadTag::<AesGcm128>::size() {
+                    return Err(Error::Truncated);
+                }
+                let (ct, tag_slice) =
+                    ciphertext.split_at_mut(ciphertext.len() - AeadTag::<AesGcm128>::size());
+                let tag = AeadTag::<AesGcm128>::from_bytes(tag_slice)?;
+                context.open_in_place_detached(ct, aad, &tag)?;
+                ct
+            }
+            Self::X25519HkdfSha256(AuthReceiverContextX25519HkdfSha256::HkdfSha256(
+                AuthReceiverContextX25519HkdfSha256HkdfSha256::ChaCha20Poly1305(context),
+            )) => {
+                if ciphertext.len() < AeadTag::<ChaCha20Poly1305>::size() {
+                    return Err(Error::Truncated);
+                }
+                let (ct, tag_slice) =
+                    ciphertext.split_at_mut(ciphertext.len() - AeadTag::<ChaCha20Poly1305>::size());
+                let tag = AeadTag::<ChaCha20Poly1305>::from_bytes(tag_slice)?;
+                context.open_in_place_detached(ct, aad, &tag)?;
+                ct
+            }
+        })
+    }
+
+    fn export(&self, info: &[u8], out_buf: &mut [u8]) -> Res<()> {
+        match self {
+            Self::X25519HkdfSha256(AuthReceiverContextX25519HkdfSha256::HkdfSha256(
+                AuthReceiverContextX25519HkdfSha256HkdfSha256::AesGcm128(context),
+            )) => {
+                context.export(info, out_buf)?;
+            }
+            Self::X25519HkdfSha256(AuthReceiverContextX25519HkdfSha256::HkdfSha256(
+                AuthReceiverContextX25519HkdfSha256HkdfSha256::ChaCha20Poly1305(context),
+            )) => {
+                context.export(info, out_buf)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// HPKE receiver context for Auth mode.
+///
+/// Unlike [`HpkeR`] which uses Base mode, this requires the sender's public
+/// key and uses `OpModeR::Auth(pk_s)`, enabling sender authentication.
+#[allow(dead_code)]
+#[allow(clippy::module_name_repetitions)]
+pub struct AuthHpkeR {
+    context: AuthReceiverContext,
+    config: Config,
+}
+
+#[allow(dead_code)]
+impl AuthHpkeR {
+    /// Create a new Auth-mode receiver context.
+    ///
+    /// Requires the sender's public key `pk_s` for authentication.
+    #[allow(clippy::similar_names)]
+    pub fn new(
+        config: Config,
+        _pk_r: &PublicKey,
+        sk_r: &PrivateKey,
+        pk_s: &PublicKey,
+        enc: &[u8],
+        info: &[u8],
+    ) -> Res<Self> {
+        macro_rules! dispatch_auth_hpker_new {
+            {
+                ($c:ident, $sk_r:ident, $pk_s:ident): [$( $(#[$meta:meta])* {
+                    $kemid:path => $kem:path,
+                    $kdfid:path => $kdf:path,
+                    $aeadid:path => $aead:path,
+                    $ske:path, $pke:path, $ctxt1:path, $ctxt2:path, $ctxt3:path $(,)?
+                }),* $(,)?]
+            } => {
+                match ($c, $sk_r, $pk_s) {
+                    $(
+                        $(#[$meta])*
+                        (
+                            Config { kem: $kemid, kdf: $kdfid, aead: $aeadid },
+                            $ske(sk_r),
+                            $pke(pk_s),
+                        ) => {
+                            let enc = <$kem as KemTrait>::EncappedKey::from_bytes(enc)?;
+                            let context = setup_receiver::<$aead, $kdf, $kem>(
+                                &OpModeR::Auth(pk_s.clone()),
+                                sk_r,
+                                &enc,
+                                info,
+                            )?;
+                            $ctxt1($ctxt2($ctxt3(Box::new(context))))
+                        }
+                    )*
+                    _ => return Err(Error::InvalidKeyType),
+                }
+            };
+        }
+
+        let context = dispatch_auth_hpker_new! {(config, sk_r, pk_s): [
+            {
+                Kem::X25519Sha256 => X25519HkdfSha256,
+                Kdf::HkdfSha256 => HkdfSha256,
+                Aead::Aes128Gcm => AesGcm128,
+                PrivateKey::X25519,
+                PublicKey::X25519,
+                AuthReceiverContext::X25519HkdfSha256,
+                AuthReceiverContextX25519HkdfSha256::HkdfSha256,
+                AuthReceiverContextX25519HkdfSha256HkdfSha256::AesGcm128,
+            },
+            {
+                Kem::X25519Sha256 => X25519HkdfSha256,
+                Kdf::HkdfSha256 => HkdfSha256,
+                Aead::ChaCha20Poly1305 => ChaCha20Poly1305,
+                PrivateKey::X25519,
+                PublicKey::X25519,
+                AuthReceiverContext::X25519HkdfSha256,
+                AuthReceiverContextX25519HkdfSha256::HkdfSha256,
+                AuthReceiverContextX25519HkdfSha256HkdfSha256::ChaCha20Poly1305,
+            },
+        ]};
+
+        Ok(Self { context, config })
+    }
+
+    pub fn config(&self) -> Config {
+        self.config
+    }
+}
+
+impl Decrypt for AuthHpkeR {
+    fn open(&mut self, aad: &[u8], ct: &[u8]) -> Res<Vec<u8>> {
+        let mut buf = ct.to_owned();
+        let pt_len = self.context.open(&mut buf, aad)?.len();
+        buf.truncate(pt_len);
+        Ok(buf)
+    }
+
+    fn alg(&self) -> Aead {
+        self.config.aead()
+    }
+}
+
+impl Exporter for AuthHpkeR {
+    fn export(&self, info: &[u8], len: usize) -> Res<SymKey> {
+        let mut buf = vec![0; len];
+        self.context.export(info, &mut buf)?;
+        Ok(SymKey::from(buf))
+    }
+}
+
+impl Deref for AuthHpkeR {
+    type Target = Config;
+    fn deref(&self) -> &Self::Target {
+        &self.config
+    }
+}
+
 /// Generate a key pair for the identified KEM.
 #[allow(clippy::unnecessary_wraps)]
 pub fn generate_key_pair(kem: Kem) -> Res<(PrivateKey, PublicKey)> {
@@ -556,7 +910,7 @@ pub fn derive_key_pair(kem: Kem, ikm: &[u8]) -> Res<(PrivateKey, PublicKey)> {
 
 #[cfg(test)]
 mod test {
-    use super::{generate_key_pair, Config, HpkeR, HpkeS};
+    use super::{generate_key_pair, AuthHpkeR, AuthHpkeS, Config, HpkeR, HpkeS};
     use crate::{
         crypto::{Decrypt, Encrypt},
         hpke::{Aead, Kem},
@@ -608,5 +962,50 @@ mod test {
     #[test]
     fn seal_open_chacha() {
         seal_open(Aead::ChaCha20Poly1305, Kem::X25519Sha256);
+    }
+
+    // ── Auth mode tests ──
+
+    #[allow(clippy::similar_names)]
+    #[test]
+    fn auth_make() {
+        init();
+        let cfg = Config::default();
+        let (sk_r, pk_r) = generate_key_pair(cfg.kem()).unwrap();
+        let (sk_s, pk_s) = generate_key_pair(cfg.kem()).unwrap();
+        let hpke_s = AuthHpkeS::new(cfg, &pk_r, &sk_s, INFO).unwrap();
+        let _hpke_r =
+            AuthHpkeR::new(cfg, &pk_r, &sk_r, &pk_s, &hpke_s.enc().unwrap(), INFO).unwrap();
+    }
+
+    #[allow(clippy::similar_names)]
+    fn auth_seal_open(aead: Aead, kem: Kem) {
+        init();
+        let cfg = Config {
+            kem,
+            aead,
+            ..Config::default()
+        };
+        assert!(cfg.supported());
+        let (sk_r, pk_r) = generate_key_pair(cfg.kem()).unwrap();
+        let (sk_s, pk_s) = generate_key_pair(cfg.kem()).unwrap();
+
+        let mut hpke_s = AuthHpkeS::new(cfg, &pk_r, &sk_s, INFO).unwrap();
+        let enc = hpke_s.enc().unwrap();
+        let ct = hpke_s.seal(AAD, PT).unwrap();
+
+        let mut hpke_r = AuthHpkeR::new(cfg, &pk_r, &sk_r, &pk_s, &enc, INFO).unwrap();
+        let pt = hpke_r.open(AAD, &ct).unwrap();
+        assert_eq!(&pt[..], PT);
+    }
+
+    #[test]
+    fn auth_seal_open_gcm() {
+        auth_seal_open(Aead::Aes128Gcm, Kem::X25519Sha256);
+    }
+
+    #[test]
+    fn auth_seal_open_chacha() {
+        auth_seal_open(Aead::ChaCha20Poly1305, Kem::X25519Sha256);
     }
 }
