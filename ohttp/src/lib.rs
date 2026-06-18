@@ -25,6 +25,7 @@ use std::{
     convert::TryFrom,
     io::{Cursor, Read},
     mem::size_of,
+    ops::Deref,
 };
 
 use byteorder::{NetworkEndian, WriteBytesExt};
@@ -51,7 +52,10 @@ use crate::{
     rh::{
         aead::{Aead, Mode, NONCE_LEN},
         hkdf::{Hkdf, KeyMechanism},
-        hpke::{Config as HpkeConfig, Exporter, HpkeR, HpkeS, PublicKey},
+        hpke::{
+            AuthHpkeR, AuthHpkeS, Config as HpkeConfig, Exporter, HpkeR, HpkeS, PrivateKey,
+            PublicKey,
+        },
         SymKey,
     },
 };
@@ -91,6 +95,7 @@ pub struct ClientRequest {
     key_id: KeyId,
     config: HpkeConfig,
     pk: PublicKey,
+    sk_s: Option<PrivateKey>,
 }
 
 #[cfg(feature = "client")]
@@ -103,6 +108,21 @@ impl ClientRequest {
             key_id: config.key_id,
             config: selected,
             pk: config.pk.clone(),
+            sk_s: None,
+        })
+    }
+
+    /// Construct a ClientRequest that uses HPKE Auth mode with the given client private key.
+    pub fn from_config_with_client_key(
+        config: &mut KeyConfig,
+        client_sk: PrivateKey,
+    ) -> Res<Self> {
+        let selected = config.select(config.symmetric[0])?;
+        Ok(Self {
+            key_id: config.key_id,
+            config: selected,
+            pk: config.pk.clone(),
+            sk_s: Some(client_sk),
         })
     }
 
@@ -130,25 +150,35 @@ impl ClientRequest {
     pub fn encapsulate(self, request: &[u8]) -> Res<(Vec<u8>, ClientResponse)> {
         // Build the info, which contains the message header.
         let info = build_info(INFO_REQUEST, self.key_id, self.config)?;
-        let mut hpke = HpkeS::new(self.config, &self.pk, &info)?;
-
         let header = Vec::from(&info[INFO_REQUEST.len() + 1..]);
         debug_assert_eq!(header.len(), REQUEST_HEADER_LEN);
 
-        let extra = hpke.config().kem().n_enc() + hpke.config().aead().n_t() + request.len();
+        let extra = self.config.kem().n_enc() + self.config.aead().n_t() + request.len();
         let expected_len = header.len() + extra;
 
         let mut enc_request = header;
         enc_request.reserve_exact(extra);
 
-        let enc = hpke.enc()?;
-        enc_request.extend_from_slice(&enc);
-
-        let mut ct = hpke.seal(&[], request)?;
-        enc_request.append(&mut ct);
-
-        debug_assert_eq!(expected_len, enc_request.len());
-        Ok((enc_request, ClientResponse::new(hpke, enc)))
+        match self.sk_s {
+            Some(sk_s) => {
+                let mut hpke = AuthHpkeS::new(self.config, &self.pk, &sk_s, &info)?;
+                let enc = hpke.enc()?;
+                enc_request.extend_from_slice(&enc);
+                let mut ct = hpke.seal(&[], request)?;
+                enc_request.append(&mut ct);
+                debug_assert_eq!(expected_len, enc_request.len());
+                Ok((enc_request, ClientResponse::from_auth(hpke, enc)))
+            }
+            None => {
+                let mut hpke = HpkeS::new(self.config, &self.pk, &info)?;
+                let enc = hpke.enc()?;
+                enc_request.extend_from_slice(&enc);
+                let mut ct = hpke.seal(&[], request)?;
+                enc_request.append(&mut ct);
+                debug_assert_eq!(expected_len, enc_request.len());
+                Ok((enc_request, ClientResponse::from_base(hpke, enc)))
+            }
+        }
     }
 
     #[cfg(feature = "stream")]
@@ -217,6 +247,49 @@ impl Server {
         Ok((request, ServerResponse::new(&hpke, &enc)?))
     }
 
+    /// Remove encapsulation on a request using HPKE Auth mode.
+    pub fn decapsulate_with_client_pk(
+        &self,
+        enc_request: &[u8],
+        client_pk: &PublicKey,
+    ) -> Res<(Vec<u8>, ServerResponse)> {
+        if enc_request.len() <= REQUEST_HEADER_LEN {
+            return Err(Error::Truncated);
+        }
+        let mut r = Cursor::new(enc_request);
+        let (mut hpke, enc) = self.decode_request_header_auth(&mut r, INFO_REQUEST, client_pk)?;
+
+        let request = hpke.open(&[], &enc_request[usize::try_from(r.position())?..])?;
+        Ok((request, ServerResponse::new(&hpke, &enc)?))
+    }
+
+    fn decode_request_header_auth(
+        &self,
+        r: &mut Cursor<&[u8]>,
+        label: &[u8],
+        client_pk: &PublicKey,
+    ) -> Res<(AuthHpkeR, Vec<u8>)> {
+        let hpke_config = self.config.decode_hpke_config(r)?;
+        let sym = SymmetricSuite::new(hpke_config.kdf(), hpke_config.aead());
+        let config = self.config.select(sym)?;
+        let info = build_info(label, self.config.key_id, hpke_config)?;
+
+        let mut enc = vec![0; config.kem().n_enc()];
+        r.read_exact(&mut enc)?;
+
+        Ok((
+            AuthHpkeR::new(
+                config,
+                &self.config.pk,
+                self.config.sk.as_ref().unwrap(),
+                client_pk,
+                &enc,
+                &info,
+            )?,
+            enc,
+        ))
+    }
+
     /// Remove encapsulation on a streamed request.
     #[cfg(feature = "stream")]
     pub fn decapsulate_stream<S>(&self, src: S) -> ServerRequestStream<S> {
@@ -226,6 +299,26 @@ impl Server {
 
 fn entropy(config: HpkeConfig) -> usize {
     max(config.aead().n_n(), config.aead().n_k())
+}
+
+/// Trait combining Exporter with a config() method, for generic ServerResponse construction.
+#[cfg(feature = "server")]
+trait ConfiguredExporter: Exporter {
+    fn cfg(&self) -> HpkeConfig;
+}
+
+#[cfg(feature = "server")]
+impl ConfiguredExporter for HpkeR {
+    fn cfg(&self) -> HpkeConfig {
+        *self.deref()
+    }
+}
+
+#[cfg(feature = "server")]
+impl ConfiguredExporter for AuthHpkeR {
+    fn cfg(&self) -> HpkeConfig {
+        *self.deref()
+    }
 }
 
 fn export_secret<E: Exporter>(exp: &E, label: &[u8], cfg: HpkeConfig) -> Res<SymKey> {
@@ -256,12 +349,12 @@ pub struct ServerResponse {
 
 #[cfg(feature = "server")]
 impl ServerResponse {
-    fn new(hpke: &HpkeR, enc: &[u8]) -> Res<Self> {
-        let response_nonce = random(entropy(hpke.config()));
+    fn new<E: ConfiguredExporter>(hpke: &E, enc: &[u8]) -> Res<Self> {
+        let response_nonce = random(entropy(hpke.cfg()));
         let aead = make_aead(
             Mode::Encrypt,
-            hpke.config(),
-            &export_secret(hpke, LABEL_RESPONSE, hpke.config())?,
+            hpke.cfg(),
+            &export_secret(hpke, LABEL_RESPONSE, hpke.cfg())?,
             enc,
             &response_nonce,
         )?;
@@ -290,22 +383,38 @@ impl std::fmt::Debug for ServerResponse {
 /// An object for decapsulating responses.
 /// The only way to obtain one of these is through `ClientRequest::encapsulate()`.
 #[cfg(feature = "client")]
-pub struct ClientResponse {
+pub enum ClientResponse {
+    Base(BaseClientResponse),
+    Auth(AuthClientResponse),
+}
+
+#[cfg(feature = "client")]
+impl ClientResponse {
+    fn from_base(hpke: HpkeS, enc: Vec<u8>) -> Self {
+        Self::Base(BaseClientResponse { hpke, enc })
+    }
+
+    fn from_auth(hpke: AuthHpkeS, enc: Vec<u8>) -> Self {
+        Self::Auth(AuthClientResponse { hpke, enc })
+    }
+
+    pub fn decapsulate(self, enc_response: &[u8]) -> Res<Vec<u8>> {
+        match self {
+            Self::Base(inner) => inner.decapsulate(enc_response),
+            Self::Auth(inner) => inner.decapsulate(enc_response),
+        }
+    }
+}
+
+#[cfg(feature = "client")]
+pub struct BaseClientResponse {
     hpke: HpkeS,
     enc: Vec<u8>,
 }
 
 #[cfg(feature = "client")]
-impl ClientResponse {
-    /// Private method for constructing one of these.
-    /// Doesn't do anything because we don't have the nonce yet, so
-    /// the work that can be done is limited.
-    fn new(hpke: HpkeS, enc: Vec<u8>) -> Self {
-        Self { hpke, enc }
-    }
-
-    /// Consume this object by decapsulating a response.
-    pub fn decapsulate(self, enc_response: &[u8]) -> Res<Vec<u8>> {
+impl BaseClientResponse {
+    fn decapsulate(self, enc_response: &[u8]) -> Res<Vec<u8>> {
         let mid = entropy(self.hpke.config());
         if mid >= enc_response.len() {
             return Err(Error::Truncated);
@@ -318,7 +427,32 @@ impl ClientResponse {
             &self.enc,
             response_nonce,
         )?;
-        aead.open(&[], ct) // 0 is the sequence number
+        aead.open(&[], ct)
+    }
+}
+
+#[cfg(feature = "client")]
+pub struct AuthClientResponse {
+    hpke: AuthHpkeS,
+    enc: Vec<u8>,
+}
+
+#[cfg(feature = "client")]
+impl AuthClientResponse {
+    fn decapsulate(self, enc_response: &[u8]) -> Res<Vec<u8>> {
+        let mid = entropy(self.hpke.config());
+        if mid >= enc_response.len() {
+            return Err(Error::Truncated);
+        }
+        let (response_nonce, ct) = enc_response.split_at(mid);
+        let mut aead = make_aead(
+            Mode::Decrypt,
+            self.hpke.config(),
+            &export_secret(&self.hpke, LABEL_RESPONSE, self.hpke.config())?,
+            &self.enc,
+            response_nonce,
+        )?;
+        aead.open(&[], ct)
     }
 }
 
