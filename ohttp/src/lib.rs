@@ -36,8 +36,8 @@ use log::trace;
 use crate::nss::{
     aead::{Aead, Mode, NONCE_LEN},
     hkdf::{Hkdf, KeyMechanism},
-    hpke::{Config as HpkeConfig, Exporter, HpkeR, HpkeS},
-    random, PublicKey, SymKey,
+    hpke::{AuthHpkeR, AuthHpkeS, Config as HpkeConfig, Exporter, HpkeR, HpkeS},
+    random, PrivateKey, PublicKey, SymKey,
 };
 #[cfg(feature = "stream")]
 use crate::stream::{ClientRequest as StreamClient, ServerRequest as ServerRequestStream};

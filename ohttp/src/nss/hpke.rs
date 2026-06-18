@@ -264,6 +264,181 @@ impl Deref for HpkeR {
     }
 }
 
+// ── Auth Mode Sender (NSS stub) ──────────────────────────────────────
+//
+// NSS does not expose a distinct Auth mode API, so this delegates to the
+// same underlying `PK11_HPKE_SetupS` / `PK11_HPKE_Seal` operations as
+// [`HpkeS`]. The public API matches the rust-hpke `AuthHpkeS` exactly so
+// that callers compile regardless of which crypto feature is enabled.
+// In practice TNG uses the rust-hpke backend; this exists for API parity.
+
+/// HPKE sender context for Auth mode (NSS backend stub).
+///
+/// Unlike [`HpkeS`] which uses Base mode, this is intended to incorporate
+/// the sender's public key into the KDF. The NSS backend delegates to the
+// same underlying operations for now.
+#[allow(clippy::module_name_repetitions)]
+pub struct AuthHpkeS {
+    context: HpkeContext,
+    config: Config,
+}
+
+impl AuthHpkeS {
+    /// Create a new Auth-mode sender context (NSS stub).
+    ///
+    /// The `sk_s` parameter is accepted for API compatibility but not used
+    /// by the NSS backend.
+    #[allow(clippy::similar_names)]
+    pub fn new(config: Config, pk_r: &PublicKey, _sk_s: &PrivateKey, info: &[u8]) -> Res<Self> {
+        // Delegate to the same SetupS call; NSS does not expose a
+        // distinct Auth-mode setup function through the public API.
+        let (sk_e, pk_e) = generate_key_pair(config.kem)?;
+        let context = HpkeContext::new(config)?;
+        secstatus_to_res(unsafe {
+            sys::PK11_HPKE_SetupS(
+                context.ptr(),
+                pk_e.ptr(),
+                sk_e.ptr(),
+                pk_r.ptr(),
+                &Item::wrap(info),
+            )
+        })?;
+        Ok(Self { context, config })
+    }
+
+    pub fn config(&self) -> Config {
+        self.config
+    }
+
+    /// Get the encapsulated KEM secret.
+    pub fn enc(&self) -> Res<Vec<u8>> {
+        let v = unsafe { sys::PK11_HPKE_GetEncapPubKey(self.context.ptr()) };
+        let r = unsafe { v.as_ref() }.ok_or_else(|| Error::from(SEC_ERROR_INVALID_ARGS))?;
+        let len = usize::try_from(r.len).unwrap();
+        let slc = unsafe { std::slice::from_raw_parts(r.data, len) };
+        Ok(Vec::from(slc))
+    }
+}
+
+impl Encrypt for AuthHpkeS {
+    fn seal(&mut self, aad: &[u8], pt: &[u8]) -> Res<Vec<u8>> {
+        let mut out: *mut sys::SECItem = null_mut();
+        secstatus_to_res(unsafe {
+            sys::PK11_HPKE_Seal(
+                self.context.ptr(),
+                &Item::wrap(aad),
+                &Item::wrap(pt),
+                &raw mut out,
+            )
+        })?;
+        let v = Item::from_ptr(out)?;
+        Ok(unsafe { v.into_vec() })
+    }
+
+    fn alg(&self) -> Aead {
+        self.config.aead()
+    }
+}
+
+impl Exporter for AuthHpkeS {
+    fn export(&self, info: &[u8], len: usize) -> Res<SymKey> {
+        self.context.export(info, len)
+    }
+}
+
+impl Deref for AuthHpkeS {
+    type Target = Config;
+    fn deref(&self) -> &Self::Target {
+        &self.config
+    }
+}
+
+// ── Auth Mode Receiver (NSS stub) ────────────────────────────────────
+//
+// NSS does not expose a distinct Auth mode API, so this delegates to the
+// same underlying `PK11_HPKE_SetupR` / `PK11_HPKE_Open` operations as
+// [`HpkeR`]. The public API matches the rust-hpke `AuthHpkeR` exactly so
+// that callers compile regardless of which crypto feature is enabled.
+// In practice TNG uses the rust-hpke backend; this exists for API parity.
+
+/// HPKE receiver context for Auth mode (NSS backend stub).
+///
+/// Unlike [`HpkeR`] which uses Base mode, this requires the sender's public
+/// key for authentication. The NSS backend delegates to the same underlying
+// operations for now.
+#[allow(clippy::module_name_repetitions)]
+pub struct AuthHpkeR {
+    context: HpkeContext,
+    config: Config,
+}
+
+impl AuthHpkeR {
+    /// Create a new Auth-mode receiver context (NSS stub).
+    ///
+    /// The `pk_s` parameter is accepted for API compatibility but not used
+    /// by the NSS backend.
+    #[allow(clippy::similar_names)]
+    pub fn new(
+        config: Config,
+        pk_r: &PublicKey,
+        sk_r: &PrivateKey,
+        _pk_s: &PublicKey,
+        enc: &[u8],
+        info: &[u8],
+    ) -> Res<Self> {
+        // Delegate to the same SetupR call; NSS does not expose a
+        // distinct Auth-mode setup function through the public API.
+        let context = HpkeContext::new(config)?;
+        secstatus_to_res(unsafe {
+            sys::PK11_HPKE_SetupR(
+                context.ptr(),
+                pk_r.ptr(),
+                sk_r.ptr(),
+                &Item::wrap(enc),
+                &Item::wrap(info),
+            )
+        })?;
+        Ok(Self { context, config })
+    }
+
+    pub fn config(&self) -> Config {
+        self.config
+    }
+}
+
+impl Decrypt for AuthHpkeR {
+    fn open(&mut self, aad: &[u8], ct: &[u8]) -> Res<Vec<u8>> {
+        let mut out: *mut sys::SECItem = null_mut();
+        secstatus_to_res(unsafe {
+            sys::PK11_HPKE_Open(
+                self.context.ptr(),
+                &Item::wrap(aad),
+                &Item::wrap(ct),
+                &raw mut out,
+            )
+        })?;
+        let v = Item::from_ptr(out)?;
+        Ok(unsafe { v.into_vec() })
+    }
+
+    fn alg(&self) -> Aead {
+        self.config.aead()
+    }
+}
+
+impl Exporter for AuthHpkeR {
+    fn export(&self, info: &[u8], len: usize) -> Res<SymKey> {
+        self.context.export(info, len)
+    }
+}
+
+impl Deref for AuthHpkeR {
+    type Target = Config;
+    fn deref(&self) -> &Self::Target {
+        &self.config
+    }
+}
+
 /// Generate a key pair for the identified KEM.
 pub fn generate_key_pair(kem: Kem) -> Res<(PrivateKey, PublicKey)> {
     assert_eq!(kem, Kem::X25519Sha256);
