@@ -45,6 +45,8 @@ pub use crate::{
     config::{KeyConfig, SymmetricSuite},
     err::Error,
 };
+#[cfg(feature = "rust-hpke")]
+pub use crate::rh::hpke::PublicKey;
 use crate::{err::Res, hpke::Aead as AeadId};
 #[cfg(feature = "rust-hpke")]
 use crate::{
@@ -54,7 +56,6 @@ use crate::{
         hkdf::{Hkdf, KeyMechanism},
         hpke::{
             AuthHpkeR, AuthHpkeS, Config as HpkeConfig, Exporter, HpkeR, HpkeS, PrivateKey,
-            PublicKey,
         },
         SymKey,
     },

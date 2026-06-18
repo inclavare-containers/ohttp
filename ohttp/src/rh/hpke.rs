@@ -72,6 +72,14 @@ impl PublicKey {
             Self::X25519(k) => Vec::from(k.to_bytes().as_slice()),
         })
     }
+
+    pub fn from_x25519_bytes(bytes: &[u8]) -> Res<Self> {
+        if bytes.len() != 32 {
+            return Err(Error::InvalidKeyType);
+        }
+        let pk = <X25519HkdfSha256 as KemTrait>::PublicKey::from_bytes(bytes)?;
+        Ok(PublicKey::X25519(pk))
+    }
 }
 
 impl std::fmt::Debug for PublicKey {
