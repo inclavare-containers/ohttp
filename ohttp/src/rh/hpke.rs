@@ -91,6 +91,16 @@ pub enum PrivateKey {
 }
 
 impl PrivateKey {
+    pub fn from_x25519_bytes(bytes: &[u8]) -> Res<Self> {
+        if bytes.len() != 32 {
+            return Err(Error::InvalidKeyType);
+        }
+        let sk = <X25519HkdfSha256 as KemTrait>::PrivateKey::from_bytes(bytes)?;
+        Ok(PrivateKey::X25519(sk))
+    }
+}
+
+impl PrivateKey {
     #[allow(clippy::unnecessary_wraps)]
     pub fn key_data(&self) -> Res<Vec<u8>> {
         Ok(match self {
@@ -627,7 +637,11 @@ impl AuthHpkeS {
             },
         ]};
 
-        Ok(Self { context, enc, config })
+        Ok(Self {
+            context,
+            enc,
+            config,
+        })
     }
 
     pub fn config(&self) -> Config {

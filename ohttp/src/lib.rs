@@ -123,6 +123,21 @@ impl ClientRequest {
         })
     }
 
+    /// Construct a ClientRequest with a client private key provided as raw X25519 bytes.
+    pub fn from_config_with_client_key_bytes(
+        config: &mut KeyConfig,
+        client_sk_bytes: &[u8],
+    ) -> Res<Self> {
+        let selected = config.select(config.symmetric[0])?;
+        let sk = PrivateKey::from_x25519_bytes(client_sk_bytes)?;
+        Ok(Self {
+            key_id: config.key_id,
+            config: selected,
+            pk: config.pk.clone(),
+            sk_s: Some(sk),
+        })
+    }
+
     /// Reads an encoded configuration and constructs a single use client sender.
     /// See `KeyConfig::decode` for the structure details.
     pub fn from_encoded_config(encoded_config: &[u8]) -> Res<Self> {
