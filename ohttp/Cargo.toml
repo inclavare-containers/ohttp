@@ -14,6 +14,14 @@ readme.workspace = true
 
 [features]
 default = ["client", "server", "rust-hpke", "stream"]
+# aws-lc backs the HPKE primitives with aws-lc instead of RustCrypto:
+# raw X25519 from aws-lc-sys plus AES-GCM/ChaCha20Poly1305 from aws-lc-rs,
+# plugged into the same rust-hpke key schedule so the wire format is
+# unchanged.  It implies `rust-hpke` because the key schedule and the
+# `Aead`/`Kem` trait machinery come from that crate.  Consumers that opt in
+# need a toolchain matching aws-lc-rs's MSRV, newer than the workspace
+# `rust-version` floor that applies to the default feature set.
+aws-lc = ["rust-hpke", "dep:aws-lc-rs", "dep:aws-lc-sys"]
 app-svc = ["nss"]
 client = []
 external-sqlite = []
@@ -27,6 +35,8 @@ unsafe-print-secrets = []
 [dependencies]
 aead = {version = "0.5", optional = true, features = ["std"]}
 aes-gcm = {version = "0.10", optional = true}
+aws-lc-rs = {version = "1.18", optional = true}
+aws-lc-sys = {version = "0.45", optional = true}
 byteorder = "1.4"
 chacha20poly1305 = {version = "0.10", optional = true}
 futures = {version = "0.3", optional = true}

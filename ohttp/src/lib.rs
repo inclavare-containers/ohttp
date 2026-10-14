@@ -7,6 +7,8 @@
 #[cfg(all(feature = "nss", feature = "rust-hpke"))]
 compile_error!("features \"nss\" and \"rust-hpke\" are mutually incompatible");
 
+#[cfg(feature = "aws-lc")]
+mod al;
 mod config;
 mod crypto;
 mod err;
@@ -15,10 +17,17 @@ pub mod hpke;
 mod nss;
 #[cfg(feature = "rust-hpke")]
 mod rand;
+// Compiled even when `aws-lc` is enabled: the public API selects one
+// backend at a time, but cross-backend tests reach into `rh` directly.
+// `aws-lc` implies `rust-hpke`, so this gate is always true there.
 #[cfg(feature = "rust-hpke")]
+#[cfg_attr(feature = "aws-lc", allow(dead_code))] // not reachable from the public API when `aws-lc` is selected
 mod rh;
 #[cfg(feature = "stream")]
 mod stream;
+
+#[cfg(all(feature = "nss", feature = "aws-lc"))]
+compile_error!("`nss` and `aws-lc` both provide the crypto backend and cannot be enabled together");
 
 use std::{
     cmp::max,
@@ -45,10 +54,12 @@ pub use crate::{
     config::{KeyConfig, SymmetricSuite},
     err::Error,
 };
-#[cfg(feature = "rust-hpke")]
+#[cfg(all(feature = "rust-hpke", not(feature = "aws-lc")))]
 pub use crate::rh::hpke::PublicKey;
+#[cfg(feature = "aws-lc")]
+pub use crate::al::hpke::PublicKey;
 use crate::{err::Res, hpke::Aead as AeadId};
-#[cfg(feature = "rust-hpke")]
+#[cfg(all(feature = "rust-hpke", not(feature = "aws-lc")))]
 use crate::{
     rand::random,
     rh::{
@@ -59,6 +70,18 @@ use crate::{
         },
         SymKey,
     },
+};
+#[cfg(feature = "aws-lc")]
+use crate::{
+    al::{
+        aead::{Aead, Mode, NONCE_LEN},
+        hkdf::{Hkdf, KeyMechanism},
+        hpke::{
+            AuthHpkeR, AuthHpkeS, Config as HpkeConfig, Exporter, HpkeR, HpkeS, PrivateKey,
+        },
+        SymKey,
+    },
+    rand::random,
 };
 
 /// The request header is a `KeyId` and 2 each for KEM, KDF, and AEAD identifiers
@@ -504,6 +527,10 @@ mod test {
         hpke::{Aead, Kdf, Kem},
         ClientRequest, Error, KeyConfig, KeyId, Server,
     };
+    #[cfg(all(feature = "rust-hpke", not(feature = "aws-lc")))]
+    use crate::rh::hpke::generate_key_pair;
+    #[cfg(feature = "aws-lc")]
+    use crate::al::hpke::generate_key_pair;
 
     pub const KEY_ID: KeyId = 1;
     pub const KEM: Kem = Kem::X25519Sha256;
@@ -718,7 +745,7 @@ mod test {
         let encoded_config = server.config().encode().unwrap();
 
         // Generate client key pair
-        let (client_sk, client_pk) = crate::rh::hpke::generate_key_pair(KEM).unwrap();
+        let (client_sk, client_pk) = generate_key_pair(KEM).unwrap();
 
         let mut config = KeyConfig::decode(&encoded_config).unwrap();
         let client = ClientRequest::from_config_with_client_key(&mut config, client_sk).unwrap();
@@ -743,8 +770,8 @@ mod test {
         let server = Server::new(server_config).unwrap();
         let encoded_config = server.config().encode().unwrap();
 
-        let (client_sk, _) = crate::rh::hpke::generate_key_pair(KEM).unwrap();
-        let (_, wrong_client_pk) = crate::rh::hpke::generate_key_pair(KEM).unwrap();
+        let (client_sk, _) = generate_key_pair(KEM).unwrap();
+        let (_, wrong_client_pk) = generate_key_pair(KEM).unwrap();
 
         let mut config = KeyConfig::decode(&encoded_config).unwrap();
         let client = ClientRequest::from_config_with_client_key(&mut config, client_sk).unwrap();
@@ -763,7 +790,7 @@ mod test {
         let server = Server::new(server_config).unwrap();
         let encoded_config = server.config().encode().unwrap();
 
-        let (client_sk, client_pk) = crate::rh::hpke::generate_key_pair(KEM).unwrap();
+        let (client_sk, client_pk) = generate_key_pair(KEM).unwrap();
 
         let mut config1 = KeyConfig::decode(&encoded_config).unwrap();
         let client1 =

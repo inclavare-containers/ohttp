@@ -10,8 +10,13 @@ use crate::nss::{
     hpke::{generate_key_pair, parse_key_pair, Config as HpkeConfig, HpkeR},
     PrivateKey, PublicKey,
 };
-#[cfg(feature = "rust-hpke")]
+#[cfg(all(feature = "rust-hpke", not(feature = "aws-lc")))]
 use crate::rh::hpke::{
+    derive_key_pair, generate_key_pair, parse_key_pair, Config as HpkeConfig, HpkeR, PrivateKey,
+    PublicKey,
+};
+#[cfg(feature = "aws-lc")]
+use crate::al::hpke::{
     derive_key_pair, generate_key_pair, parse_key_pair, Config as HpkeConfig, HpkeR, PrivateKey,
     PublicKey,
 };

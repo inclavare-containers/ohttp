@@ -16,6 +16,7 @@ readme.workspace = true
 default = ["rust-hpke"]
 nss = ["ohttp/nss"]
 rust-hpke = ["ohttp/rust-hpke"]
+aws-lc = ["ohttp/aws-lc"]
 
 [dependencies]
 env_logger = {version = "0.11", default-features = false}
