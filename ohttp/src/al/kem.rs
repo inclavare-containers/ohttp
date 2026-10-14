@@ -31,7 +31,7 @@ impl Debug for PublicKey {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct PrivateKey {
     /// Raw (unclamped) scalar bytes, matching what dalek's `StaticSecret`
     /// stores: dalek defers the RFC 7748 clamp to multiplication time, so
@@ -68,8 +68,9 @@ const BASEPOINT: [u8; NPK] = {
 /// exactly like dalek's `mul_clamped`.
 fn x25519(scalar: &[u8; NPK], point: &[u8; NPK]) -> [u8; NPK] {
     let mut out = [0u8; NPK];
-    // The output and both inputs are fixed-size 32-byte arrays; aws-lc
-    // writes exactly NOUT_BYTES to `out`.
+    // aws-lc returns 0 on internal allocation failure and writes an
+    // all-zero buffer; the DH callers reject all-zero output, so a
+    // failure surfaces as the spec-mandated abort.
     unsafe { aws_lc_sys::X25519(out.as_mut_ptr(), scalar.as_ptr(), point.as_ptr()) };
     out
 }
@@ -79,14 +80,40 @@ fn base_mult(sk: &[u8; NPK]) -> PublicKey {
 }
 
 /// `DH(sk, pk)` as defined by RFC 9180 §7.1: the all-zero result must
-/// abort (`HpkeError::DecapError`/`EncapError` is selected by the caller).
-fn dh(sk: &PrivateKey, pk: &PublicKey) -> Result<[u8; NPK], HpkeError> {
+/// abort.  `None` here; the caller maps it to `EncapError`/`DecapError`
+/// exactly like rust-hpke does (the observable error class is part of
+/// the cross-backend parity contract).
+fn dh(sk: &PrivateKey, pk: &PublicKey) -> Option<[u8; NPK]> {
     let shared = x25519(&sk.sk, &pk.0);
     if shared == [0u8; NPK] {
-        return Err(HpkeError::ValidationError);
+        return None;
     }
-    Ok(shared)
+    Some(shared)
 }
+
+/// Zero the scalar bytes when the key is dropped, mirroring dalek's
+/// `zeroize(drop)` on `StaticSecret`.
+impl Drop for PrivateKey {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.sk);
+    }
+}
+
+/// rust-hpke compares backend private keys in constant time
+/// (`subtle::ConstantTimeEq` over `to_bytes()`); match that so error
+/// paths cannot leak scalar bits through timing.
+impl subtle::ConstantTimeEq for PrivateKey {
+    fn ct_eq(&self, other: &Self) -> subtle::Choice {
+        subtle::ConstantTimeEq::ct_eq(&self.sk[..], &other.sk[..])
+    }
+}
+
+impl PartialEq for PrivateKey {
+    fn eq(&self, other: &Self) -> bool {
+        subtle::ConstantTimeEq::ct_eq(self, other).into()
+    }
+}
+impl Eq for PrivateKey {}
 
 impl PrivateKey {
     /// Build from raw scalar bytes, exactly like dalek's
@@ -216,7 +243,7 @@ impl KemTrait for AwsX25519HkdfSha256 {
         pk_sender_id: Option<&PublicKey>,
         encapped_key: &EncappedKey,
     ) -> Result<SharedSecret<Self>, HpkeError> {
-        let kex_res_eph = dh(sk_recip, &encapped_key.0)?;
+        let kex_res_eph = dh(sk_recip, &encapped_key.0).ok_or(HpkeError::DecapError)?;
 
         let mut kem_context = [0u8; 3 * NPK];
         kem_context[..NPK].copy_from_slice(&encapped_key.0 .0);
@@ -225,7 +252,7 @@ impl KemTrait for AwsX25519HkdfSha256 {
         dh_bytes[..NPK].copy_from_slice(&kex_res_eph);
         let (kem_context_len, dh_len) = if let Some(pk_sender_id) = pk_sender_id {
             kem_context[2 * NPK..].copy_from_slice(&pk_sender_id.0);
-            let kex_res_identity = dh(sk_recip, pk_sender_id)?;
+            let kex_res_identity = dh(sk_recip, pk_sender_id).ok_or(HpkeError::DecapError)?;
             dh_bytes[NPK..].copy_from_slice(&kex_res_identity);
             (3 * NPK, 2 * NPK)
         } else {
@@ -248,7 +275,7 @@ pub(crate) fn encap_with_eph(
     sender_id_keypair: Option<(&PrivateKey, &PublicKey)>,
     sk_eph: &PrivateKey,
 ) -> Result<(SharedSecret<AwsX25519HkdfSha256>, EncappedKey), HpkeError> {
-    let kex_res_eph = dh(sk_eph, pk_recip)?;
+    let kex_res_eph = dh(sk_eph, pk_recip).ok_or(HpkeError::EncapError)?;
     let encapped_key = EncappedKey(sk_eph.pk.clone());
 
     let mut kem_context = [0u8; 3 * NPK];
@@ -258,7 +285,7 @@ pub(crate) fn encap_with_eph(
     dh_bytes[..NPK].copy_from_slice(&kex_res_eph);
     let (kem_context_len, dh_len) = if let Some((sk_sender_id, pk_sender_id)) = sender_id_keypair {
         kem_context[2 * NPK..].copy_from_slice(&pk_sender_id.0);
-        let kex_res_identity = dh(sk_sender_id, pk_recip)?;
+        let kex_res_identity = dh(sk_sender_id, pk_recip).ok_or(HpkeError::EncapError)?;
         dh_bytes[NPK..].copy_from_slice(&kex_res_identity);
         (3 * NPK, 2 * NPK)
     } else {

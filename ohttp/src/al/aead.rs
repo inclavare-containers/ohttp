@@ -1,8 +1,8 @@
-use aead::{AeadCore, AeadInPlace, Error as AeadError, KeyInit, KeySizeUser};
 use ::hpke::generic_array::{
-    typenum::{U0, U12, U16, U32, Unsigned},
+    typenum::{Unsigned, U0, U12, U16, U32},
     GenericArray,
 };
+use aead::{AeadCore, AeadInPlace, Error as AeadError, KeyInit, KeySizeUser};
 use aws_lc_rs::aead::{
     Aad, LessSafeKey, Nonce, UnboundKey, AES_128_GCM, AES_256_GCM, CHACHA20_POLY1305,
 };
@@ -39,9 +39,17 @@ fn mk_nonce(n: &[u8]) -> Result<Nonce, AeadError> {
 }
 
 fn new_key(alg: &'static aws_lc_rs::aead::Algorithm, key: &[u8]) -> LessSafeKey {
-    // Key sizes are compile-time checked by the engine's `KeySize`, so
-    // `UnboundKey::new` cannot fail here.
+    // Only called where the key length is compile-time fixed (engine
+    // `KeySize`), so `UnboundKey::new` cannot fail.
     LessSafeKey::new(UnboundKey::new(alg, key).expect("fixed key size"))
+}
+
+/// Runtime-length variant for the standalone path: an exported key of a
+/// size that does not match the algorithm is an error, not a panic.
+fn try_new_key(alg: &'static aws_lc_rs::aead::Algorithm, key: &[u8]) -> Res<LessSafeKey> {
+    UnboundKey::new(alg, key)
+        .map(LessSafeKey::new)
+        .map_err(|_| crate::err::Error::Internal)
 }
 
 /// One engine per AEAD: raw key bytes plus the algorithm constant.
@@ -69,6 +77,12 @@ macro_rules! impl_engine {
                 let mut k = [0u8; <$keysize as Unsigned>::USIZE];
                 k.copy_from_slice(key.as_slice());
                 Self { key: k }
+            }
+        }
+
+        impl Drop for $name {
+            fn drop(&mut self) {
+                zeroize::Zeroize::zeroize(&mut self.key);
             }
         }
 
@@ -109,7 +123,6 @@ macro_rules! impl_engine {
                 .map_err(aws_err)?;
                 Ok(())
             }
-
         }
     };
 }
@@ -161,7 +174,7 @@ impl Aead {
             AeadId::Aes256Gcm => &AES_256_GCM,
             AeadId::ChaCha20Poly1305 => &CHACHA20_POLY1305,
         };
-        let engine = new_key(alg, key.as_ref());
+        let engine = try_new_key(alg, key.as_ref())?;
         Ok(Self {
             mode,
             algorithm,

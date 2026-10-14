@@ -21,7 +21,8 @@ mod rand;
 // backend at a time, but cross-backend tests reach into `rh` directly.
 // `aws-lc` implies `rust-hpke`, so this gate is always true there.
 #[cfg(feature = "rust-hpke")]
-#[cfg_attr(feature = "aws-lc", allow(dead_code))] // not reachable from the public API when `aws-lc` is selected
+#[cfg_attr(feature = "aws-lc", allow(dead_code))]
+// not reachable from the public API when `aws-lc` is selected
 mod rh;
 #[cfg(feature = "stream")]
 mod stream;
@@ -41,6 +42,8 @@ use byteorder::{NetworkEndian, WriteBytesExt};
 use crypto::{Decrypt, Encrypt};
 use log::trace;
 
+#[cfg(feature = "aws-lc")]
+pub use crate::al::hpke::PublicKey;
 #[cfg(feature = "nss")]
 use crate::nss::{
     aead::{Aead, Mode, NONCE_LEN},
@@ -48,16 +51,24 @@ use crate::nss::{
     hpke::{AuthHpkeR, AuthHpkeS, Config as HpkeConfig, Exporter, HpkeR, HpkeS},
     random, PrivateKey, PublicKey, SymKey,
 };
+#[cfg(all(feature = "rust-hpke", not(feature = "aws-lc")))]
+pub use crate::rh::hpke::PublicKey;
 #[cfg(feature = "stream")]
 use crate::stream::{ClientRequest as StreamClient, ServerRequest as ServerRequestStream};
+#[cfg(feature = "aws-lc")]
+use crate::{
+    al::{
+        aead::{Aead, Mode, NONCE_LEN},
+        hkdf::{Hkdf, KeyMechanism},
+        hpke::{AuthHpkeR, AuthHpkeS, Config as HpkeConfig, Exporter, HpkeR, HpkeS, PrivateKey},
+        SymKey,
+    },
+    rand::random,
+};
 pub use crate::{
     config::{KeyConfig, SymmetricSuite},
     err::Error,
 };
-#[cfg(all(feature = "rust-hpke", not(feature = "aws-lc")))]
-pub use crate::rh::hpke::PublicKey;
-#[cfg(feature = "aws-lc")]
-pub use crate::al::hpke::PublicKey;
 use crate::{err::Res, hpke::Aead as AeadId};
 #[cfg(all(feature = "rust-hpke", not(feature = "aws-lc")))]
 use crate::{
@@ -65,23 +76,9 @@ use crate::{
     rh::{
         aead::{Aead, Mode, NONCE_LEN},
         hkdf::{Hkdf, KeyMechanism},
-        hpke::{
-            AuthHpkeR, AuthHpkeS, Config as HpkeConfig, Exporter, HpkeR, HpkeS, PrivateKey,
-        },
+        hpke::{AuthHpkeR, AuthHpkeS, Config as HpkeConfig, Exporter, HpkeR, HpkeS, PrivateKey},
         SymKey,
     },
-};
-#[cfg(feature = "aws-lc")]
-use crate::{
-    al::{
-        aead::{Aead, Mode, NONCE_LEN},
-        hkdf::{Hkdf, KeyMechanism},
-        hpke::{
-            AuthHpkeR, AuthHpkeS, Config as HpkeConfig, Exporter, HpkeR, HpkeS, PrivateKey,
-        },
-        SymKey,
-    },
-    rand::random,
 };
 
 /// The request header is a `KeyId` and 2 each for KEM, KDF, and AEAD identifiers
@@ -521,16 +518,16 @@ mod test {
 
     use log::trace;
 
+    #[cfg(feature = "aws-lc")]
+    use crate::al::hpke::generate_key_pair;
+    #[cfg(all(feature = "rust-hpke", not(feature = "aws-lc")))]
+    use crate::rh::hpke::generate_key_pair;
     use crate::{
         config::SymmetricSuite,
         err::Res,
         hpke::{Aead, Kdf, Kem},
         ClientRequest, Error, KeyConfig, KeyId, Server,
     };
-    #[cfg(all(feature = "rust-hpke", not(feature = "aws-lc")))]
-    use crate::rh::hpke::generate_key_pair;
-    #[cfg(feature = "aws-lc")]
-    use crate::al::hpke::generate_key_pair;
 
     pub const KEY_ID: KeyId = 1;
     pub const KEM: Kem = Kem::X25519Sha256;

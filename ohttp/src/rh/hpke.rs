@@ -473,6 +473,7 @@ impl HpkeR {
         Ok(Self { context, config })
     }
 
+    #[allow(dead_code)] // used only with the `stream` feature
     pub fn config(&self) -> Config {
         self.config
     }

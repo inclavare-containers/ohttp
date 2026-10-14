@@ -11,11 +11,11 @@ use rust_hpke::{
     setup_receiver, setup_sender, Deserializable, OpModeR, OpModeS, Serializable,
 };
 
+use super::SymKey;
 use super::{
     aead::{AwsAesGcm128, AwsChaCha20Poly1305},
     kem::{AwsX25519HkdfSha256, EncappedKey, PrivateKey as KemSk, PublicKey as KemPk},
 };
-use super::SymKey;
 use crate::{
     crypto::{Decrypt, Encrypt},
     hpke::{Aead, Kdf, Kem},
@@ -375,9 +375,8 @@ impl ReceiverContext {
                 if ciphertext.len() < AeadTag::<AwsChaCha20Poly1305>::size() {
                     return Err(Error::Truncated);
                 }
-                let (ct, tag_slice) = ciphertext.split_at_mut(
-                    ciphertext.len() - AeadTag::<AwsChaCha20Poly1305>::size(),
-                );
+                let (ct, tag_slice) = ciphertext
+                    .split_at_mut(ciphertext.len() - AeadTag::<AwsChaCha20Poly1305>::size());
                 let tag = AeadTag::<AwsChaCha20Poly1305>::from_bytes(tag_slice)?;
                 context.open_in_place_detached(ct, aad, &tag)?;
                 ct
@@ -476,6 +475,7 @@ impl HpkeR {
         Ok(Self { context, config })
     }
 
+    #[allow(dead_code)] // used only with the `stream` feature
     pub fn config(&self) -> Config {
         self.config
     }
@@ -724,9 +724,8 @@ impl AuthReceiverContext {
                 if ciphertext.len() < AeadTag::<AwsChaCha20Poly1305>::size() {
                     return Err(Error::Truncated);
                 }
-                let (ct, tag_slice) = ciphertext.split_at_mut(
-                    ciphertext.len() - AeadTag::<AwsChaCha20Poly1305>::size(),
-                );
+                let (ct, tag_slice) = ciphertext
+                    .split_at_mut(ciphertext.len() - AeadTag::<AwsChaCha20Poly1305>::size());
                 let tag = AeadTag::<AwsChaCha20Poly1305>::from_bytes(tag_slice)?;
                 context.open_in_place_detached(ct, aad, &tag)?;
                 ct
@@ -832,6 +831,7 @@ impl AuthHpkeR {
         Ok(Self { context, config })
     }
 
+    #[allow(dead_code)] // used only with the `stream` feature
     pub fn config(&self) -> Config {
         self.config
     }

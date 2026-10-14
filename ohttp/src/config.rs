@@ -5,6 +5,11 @@ use std::{
 
 use byteorder::{NetworkEndian, ReadBytesExt, WriteBytesExt};
 
+#[cfg(feature = "aws-lc")]
+use crate::al::hpke::{
+    derive_key_pair, generate_key_pair, parse_key_pair, Config as HpkeConfig, HpkeR, PrivateKey,
+    PublicKey,
+};
 #[cfg(feature = "nss")]
 use crate::nss::{
     hpke::{generate_key_pair, parse_key_pair, Config as HpkeConfig, HpkeR},
@@ -12,11 +17,6 @@ use crate::nss::{
 };
 #[cfg(all(feature = "rust-hpke", not(feature = "aws-lc")))]
 use crate::rh::hpke::{
-    derive_key_pair, generate_key_pair, parse_key_pair, Config as HpkeConfig, HpkeR, PrivateKey,
-    PublicKey,
-};
-#[cfg(feature = "aws-lc")]
-use crate::al::hpke::{
     derive_key_pair, generate_key_pair, parse_key_pair, Config as HpkeConfig, HpkeR, PrivateKey,
     PublicKey,
 };

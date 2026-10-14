@@ -3,7 +3,7 @@
 // 0.7 us per extract+expand, and the schedule makes ~6 calls per request),
 // so reusing the proven RustCrypto code keeps byte behavior and adds no
 // dependency surface.
-#![allow(dead_code)] // TODO: remove
+#![allow(dead_code)] // mirrors `crate::rh::hkdf`; not every helper is reached from ohttp
 
 use hkdf::Hkdf as HkdfImpl;
 use log::trace;

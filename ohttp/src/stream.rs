@@ -11,13 +11,13 @@ use std::{
 use futures::{AsyncRead, AsyncWrite};
 use pin_project::pin_project;
 
+#[cfg(feature = "aws-lc")]
+use crate::al::hpke::Exporter;
 use crate::hpke::Aead as AeadId;
 #[cfg(feature = "nss")]
 use crate::nss::hpke::Exporter;
 #[cfg(all(feature = "rust-hpke", not(feature = "aws-lc")))]
 use crate::rh::hpke::Exporter;
-#[cfg(feature = "aws-lc")]
-use crate::al::hpke::Exporter;
 use crate::{
     build_info,
     crypto::{Decrypt, Encrypt},

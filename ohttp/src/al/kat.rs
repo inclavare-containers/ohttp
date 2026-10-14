@@ -18,8 +18,8 @@ use ::hpke::{
 };
 
 use super::aead::{self, EngineAes128Gcm};
-use super::kem::{AwsX25519HkdfSha256, EncappedKey, PrivateKey, PublicKey};
 use super::hpke;
+use super::kem::{AwsX25519HkdfSha256, EncappedKey, PrivateKey, PublicKey};
 use crate::{
     crypto::{Decrypt, Encrypt},
     hpke::{Aead, Kdf, Kem},
@@ -54,27 +54,18 @@ fn derive_keypair_base_vector() {
     // The vector's skEm is the pre-clamp LabeledExpand output; the
     // implementation stores the clamped scalar.
     assert_eq!(raw_dkp_sk(BASE_IKME), unhex(BASE_SKEM).as_slice());
-    assert_eq!(
-        sk.to_bytes().as_slice(),
-        &unhex(BASE_SKEM)[..32]
-    );
+    assert_eq!(sk.to_bytes().as_slice(), &unhex(BASE_SKEM)[..32]);
     assert_eq!(pk.to_bytes().as_slice(), unhex(BASE_PKEM).as_slice());
 
     let (sk, pk) = AwsX25519HkdfSha256::derive_keypair(&unhex(BASE_IKMR));
-    assert_eq!(
-        sk.to_bytes().as_slice(),
-        &unhex(BASE_SKRM)[..32]
-    );
+    assert_eq!(sk.to_bytes().as_slice(), &unhex(BASE_SKRM)[..32]);
     assert_eq!(pk.to_bytes().as_slice(), unhex(BASE_PKRM).as_slice());
 }
 
 #[test]
 fn derive_keypair_auth_vector() {
     let (sk, pk) = AwsX25519HkdfSha256::derive_keypair(&unhex(AUTH_IKMS));
-    assert_eq!(
-        sk.to_bytes().as_slice(),
-        &unhex(AUTH_SKSM)[..32]
-    );
+    assert_eq!(sk.to_bytes().as_slice(), &unhex(AUTH_SKSM)[..32]);
     assert_eq!(pk.to_bytes().as_slice(), unhex(AUTH_PKSM).as_slice());
 }
 
@@ -165,6 +156,25 @@ fn standalone_aead_vector_sequence() {
         let sealed = enc.seal(&aad, &pt).unwrap();
         assert_eq!(sealed, ct);
         let opened = dec.open(&aad, &ct).unwrap();
+        assert_eq!(opened, pt);
+    }
+
+    // Entries 6..8 are sequence 254/255/256, where the mask touches two
+    // bytes: a byte-order inversion in the sequence XOR would slip past
+    // the 0..5 cases above but fails the open against the golden nonce
+    // and ciphertext here.
+    for (seq, (nonce, aad, pt, ct)) in [
+        (254u64, BASE_ENCRYPTS[6]),
+        (255, BASE_ENCRYPTS[7]),
+        (256, BASE_ENCRYPTS[8]),
+    ] {
+        let (nonce, aad, pt, ct) = (unhex(nonce), unhex(aad), unhex(pt), unhex(ct));
+        let mut expect = nonce_base;
+        for (i, b) in expect.iter_mut().rev().take(8).enumerate() {
+            *b ^= ((seq >> (8 * i)) & 0xff) as u8;
+        }
+        assert_eq!(expect.to_vec(), nonce, "multi-byte nonce mask at seq {seq}");
+        let opened = dec.open_seq(&aad, seq, &ct).unwrap();
         assert_eq!(opened, pt);
     }
 }
@@ -277,14 +287,13 @@ fn cross_backend_setup_round_trip() {
     let pk_rh =
         <X25519HkdfSha256 as KemTrait>::PublicKey::from_bytes(&pk_a.key_data().unwrap()).unwrap();
     let mut csprng = Fixed(99);
-    let (enc, mut sender) =
-        ::hpke::setup_sender::<AesGcm128, HkdfSha256, X25519HkdfSha256, _>(
-            &OpModeS::Base,
-            &pk_rh,
-            b"info",
-            &mut csprng,
-        )
-        .unwrap();
+    let (enc, mut sender) = ::hpke::setup_sender::<AesGcm128, HkdfSha256, X25519HkdfSha256, _>(
+        &OpModeS::Base,
+        &pk_rh,
+        b"info",
+        &mut csprng,
+    )
+    .unwrap();
     let mut buf = b"payload".to_vec();
     let tag = sender.seal_in_place_detached(&mut buf, b"").unwrap();
     let mut sealed = buf;
@@ -294,11 +303,12 @@ fn cross_backend_setup_round_trip() {
 
     // aws-lc seals, rust-hpke opens.
     let (sk_b, pk_b) = X25519HkdfSha256::gen_keypair(&mut Fixed(123));
-    let pk_ours = hpke::PublicKey::X25519(PublicKey::from_bytes(pk_b.to_bytes().as_slice()).unwrap());
+    let pk_ours =
+        hpke::PublicKey::X25519(PublicKey::from_bytes(pk_b.to_bytes().as_slice()).unwrap());
     let mut sender = hpke::HpkeS::new(cfg, &pk_ours, b"info").unwrap();
     let sealed = sender.seal(b"", b"payload").unwrap();
-    let enc = <X25519HkdfSha256 as KemTrait>::EncappedKey::from_bytes(&sender.enc().unwrap())
-        .unwrap();
+    let enc =
+        <X25519HkdfSha256 as KemTrait>::EncappedKey::from_bytes(&sender.enc().unwrap()).unwrap();
     let mut receiver: AeadCtxR<AesGcm128, HkdfSha256, X25519HkdfSha256> =
         ::hpke::setup_receiver(&OpModeR::Base, &sk_b, &enc, b"info").unwrap();
     let ct_len = sealed.len() - 16;
