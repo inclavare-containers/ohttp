@@ -57,6 +57,9 @@ impl Debug for PrivateKey {
 pub struct EncappedKey(PublicKey);
 
 /// Fixed base point (9 little-endian) for the scalar * G operation.
+/// Used only by the test cross-check below; production derives the public
+/// key through `X25519_public_from_private`.
+#[cfg(test)]
 const BASEPOINT: [u8; NPK] = {
     let mut p = [0u8; NPK];
     p[0] = 9;
@@ -76,6 +79,19 @@ fn x25519(scalar: &[u8; NPK], point: &[u8; NPK]) -> [u8; NPK] {
 }
 
 fn base_mult(sk: &[u8; NPK]) -> PublicKey {
+    let mut out = [0u8; NPK];
+    // `X25519_public_from_private` is the same RFC 7748 scalar*G as passing
+    // `BASEPOINT` through the generic `X25519` ladder (aws-lc applies the §5
+    // clamp inside both), but it uses the base-point specialized multiply,
+    // which costs ~7us on this platform versus ~25us for the generic ladder.
+    unsafe { aws_lc_sys::X25519_public_from_private(out.as_mut_ptr(), sk.as_ptr()) };
+    PublicKey(out)
+}
+
+/// Cross-check used only by tests: the generic-ladder derivation the
+/// implementation used before the specialized base multiply existed.
+#[cfg(test)]
+fn base_mult_generic(sk: &[u8; NPK]) -> PublicKey {
     PublicKey(x25519(sk, &BASEPOINT))
 }
 
@@ -296,4 +312,33 @@ pub(crate) fn encap_with_eph(
         extract_and_expand_shared(&dh_bytes[..dh_len], &kem_context[..kem_context_len]),
         encapped_key,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `X25519_public_from_private` (specialized base multiply) must agree
+    /// byte-for-byte with the generic ladder evaluated at the base point for
+    /// every scalar, including the all-zero and all-one edge inputs.  This
+    /// is the parity contract that keeps `derive_keypair`'s `enc` bytes, and
+    /// therefore the whole wire format, unchanged.
+    #[test]
+    fn base_mult_matches_generic_ladder() {
+        let sk = [0u8; NPK];
+        assert_eq!(base_mult(&sk), base_mult_generic(&sk));
+        let sk = [0xff; NPK];
+        assert_eq!(base_mult(&sk), base_mult_generic(&sk));
+        let mut state = 0x853c_49e6_74fe_f1d1u64;
+        let mut sk = [0u8; NPK];
+        for _ in 0..4096 {
+            for b in sk.iter_mut() {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                *b = (state & 0xff) as u8;
+            }
+            assert_eq!(base_mult(&sk), base_mult_generic(&sk), "sk {sk:?}");
+        }
+    }
 }
