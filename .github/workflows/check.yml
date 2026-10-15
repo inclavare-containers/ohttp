@@ -70,11 +70,11 @@ jobs:
 
       - name: Build
         run: |
-          cargo +${{ matrix.rust }} build --tests --no-default-features --features ${{ matrix.hpke }},client,server
+          cargo +${{ matrix.rust }} build --tests --no-default-features --features ${{ matrix.hpke }},client,server${{ matrix.hpke == 'nss' && '' || ',stream' }}
 
       - name: Run Tests
         run: |
-          cargo +${{ matrix.rust }} test --no-default-features --features ${{ matrix.hpke }},client,server
+          cargo +${{ matrix.rust }} test --no-default-features --features ${{ matrix.hpke }},client,server${{ matrix.hpke == 'nss' && '' || ',stream' }}
 
       - name: Check formatting
         if: ${{ success() || failure() }}
@@ -84,4 +84,4 @@ jobs:
       - name: Clippy
         if: ${{ success() || failure() }}
         run: |
-          cargo clippy --tests --no-default-features --features ${{ matrix.hpke }},client,server
+          cargo clippy --tests --no-default-features --features ${{ matrix.hpke }},client,server${{ matrix.hpke == 'nss' && '' || ',stream' }}

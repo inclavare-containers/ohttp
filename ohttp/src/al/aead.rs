@@ -213,6 +213,29 @@ impl Aead {
             .map_err(aws_err)?;
         Ok(pt)
     }
+
+    /// `open_seq` decrypting into the caller's buffer: `in_out` holds
+    /// `ct||tag` and receives the plaintext at its front.  On failure the
+    /// buffer content is unspecified (aws-lc decrypts before checking the
+    /// tag), matching the `Decrypt::open_in_place` contract.
+    pub fn open_seq_in_place(
+        &mut self,
+        aad: &[u8],
+        seq: SequenceNumber,
+        in_out: &mut [u8],
+    ) -> Res<usize> {
+        assert_eq!(self.mode, Mode::Decrypt);
+        if in_out.len() < TAG_LEN {
+            return Err(AeadError.into());
+        }
+        let split = in_out.len() - TAG_LEN;
+        let (ciphertext, tag) = in_out.split_at_mut(split);
+        let n = mk_nonce(&self.nonce(seq))?;
+        self.engine
+            .open_in_place_separate_tag(n, Aad::from(aad), tag, ciphertext)
+            .map_err(aws_err)?;
+        Ok(split)
+    }
 }
 
 impl Encrypt for Aead {
@@ -230,6 +253,25 @@ impl Encrypt for Aead {
         Ok(out)
     }
 
+    fn seal_into(&mut self, aad: &[u8], pt: &[u8], out: &mut Vec<u8>) -> Res<()> {
+        assert_eq!(self.mode, Mode::Encrypt);
+        // Same sequencing as `seal`: the nonce is taken and the sequence
+        // number advances before any work that can fail, so exactly one
+        // nonce is consumed per call even on error (never a reuse).
+        let nonce = self.nonce(self.seq);
+        self.seq += 1;
+        out.clear();
+        out.reserve(pt.len() + TAG_LEN);
+        out.extend_from_slice(pt);
+        let n = mk_nonce(&nonce)?;
+        let tag = self
+            .engine
+            .seal_in_place_separate_tag(n, Aad::from(aad), out)
+            .map_err(aws_err)?;
+        out.extend_from_slice(tag.as_ref());
+        Ok(())
+    }
+
     #[allow(unused)]
     fn alg(&self) -> AeadId {
         self.algorithm
@@ -239,6 +281,14 @@ impl Encrypt for Aead {
 impl Decrypt for Aead {
     fn open(&mut self, aad: &[u8], ct: &[u8]) -> Res<Vec<u8>> {
         let res = self.open_seq(aad, self.seq, ct);
+        self.seq += 1;
+        res
+    }
+
+    fn open_in_place(&mut self, aad: &[u8], in_out: &mut [u8]) -> Res<usize> {
+        // Same sequencing as `open`: the sequence number advances once per
+        // call, even on failure.
+        let res = self.open_seq_in_place(aad, self.seq, in_out);
         self.seq += 1;
         res
     }

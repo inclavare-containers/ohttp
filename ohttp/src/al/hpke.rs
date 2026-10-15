@@ -321,6 +321,17 @@ impl Encrypt for HpkeS {
         Ok(buf)
     }
 
+    fn seal_into(&mut self, aad: &[u8], pt: &[u8], out: &mut Vec<u8>) -> Res<()> {
+        // The hpke-style context seals in place and hands back the detached
+        // tag, so the caller's buffer is filled with exactly one copy of the
+        // plaintext and no separate tag allocation.
+        out.clear();
+        out.extend_from_slice(pt);
+        let mut tag = self.context.seal(out, aad)?;
+        out.append(&mut tag);
+        Ok(())
+    }
+
     fn alg(&self) -> Aead {
         self.config.aead()
     }
@@ -493,6 +504,13 @@ impl Decrypt for HpkeR {
         let pt_len = self.context.open(&mut buf, aad)?.len();
         buf.truncate(pt_len);
         Ok(buf)
+    }
+
+    fn open_in_place(&mut self, aad: &[u8], in_out: &mut [u8]) -> Res<usize> {
+        // The receiver context already opens in place; surface its
+        // plaintext length so the chunk reader needs no temporary.
+        let pt = self.context.open(in_out, aad)?;
+        Ok(pt.len())
     }
 
     fn alg(&self) -> Aead {
@@ -670,6 +688,14 @@ impl Encrypt for AuthHpkeS {
         Ok(buf)
     }
 
+    fn seal_into(&mut self, aad: &[u8], pt: &[u8], out: &mut Vec<u8>) -> Res<()> {
+        out.clear();
+        out.extend_from_slice(pt);
+        let mut tag = self.context.seal(out, aad)?;
+        out.append(&mut tag);
+        Ok(())
+    }
+
     fn alg(&self) -> Aead {
         self.config.aead()
     }
@@ -843,6 +869,11 @@ impl Decrypt for AuthHpkeR {
         let pt_len = self.context.open(&mut buf, aad)?.len();
         buf.truncate(pt_len);
         Ok(buf)
+    }
+
+    fn open_in_place(&mut self, aad: &[u8], in_out: &mut [u8]) -> Res<usize> {
+        let pt = self.context.open(in_out, aad)?;
+        Ok(pt.len())
     }
 
     fn alg(&self) -> Aead {

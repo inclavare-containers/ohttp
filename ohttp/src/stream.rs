@@ -70,6 +70,17 @@ impl Encrypt for AnySenderCipher {
             AnySenderCipher::Auth(s) => s.seal(aad, pt),
         }
     }
+
+    // Forward, do not inherit the trait default: the default routes back
+    // through `seal` here and the backend's in-place implementation would
+    // never run.
+    fn seal_into(&mut self, aad: &[u8], pt: &[u8], out: &mut Vec<u8>) -> Res<()> {
+        match self {
+            AnySenderCipher::Base(s) => s.seal_into(aad, pt, out),
+            #[cfg(feature = "rust-hpke")]
+            AnySenderCipher::Auth(s) => s.seal_into(aad, pt, out),
+        }
+    }
     fn alg(&self) -> AeadId {
         match self {
             AnySenderCipher::Base(s) => s.alg(),
@@ -113,6 +124,15 @@ impl Decrypt for AnyReceiverCipher {
             AnyReceiverCipher::Auth(r) => r.open(aad, ct),
         }
     }
+
+    // Forward, same reason as `AnySenderCipher::seal_into`.
+    fn open_in_place(&mut self, aad: &[u8], in_out: &mut [u8]) -> Res<usize> {
+        match self {
+            AnyReceiverCipher::Base(r) => r.open_in_place(aad, in_out),
+            #[cfg(feature = "rust-hpke")]
+            AnyReceiverCipher::Auth(r) => r.open_in_place(aad, in_out),
+        }
+    }
     fn alg(&self) -> AeadId {
         match self {
             AnyReceiverCipher::Base(r) => r.alg(),
@@ -146,6 +166,11 @@ struct ChunkWriter<D, E> {
     dst: D,
     cipher: E,
     buf: Vec<u8>,
+    /// Ciphertext scratch for `write_chunk`.  Its allocation is reused
+    /// across chunks; contents are only handed to `dst` after a successful
+    /// seal, so a failed seal leaves nothing observable (as did dropping
+    /// the fresh Vec before).
+    ct: Vec<u8>,
     closed: bool,
 }
 
@@ -209,7 +234,15 @@ impl<D: AsyncWrite, C: Encrypt> ChunkWriter<D, C> {
         last: bool,
     ) -> IoResult<usize> {
         let aad = if last { FINAL_CHUNK_AAD } else { CHUNK_AAD };
-        let mut ct = this.cipher.seal(aad, input).map_err(IoError::other)?;
+        // Seal into the persistent scratch so the ciphertext allocation is
+        // reused across chunks.  Bytes only reach `dst` (or `buf`) after a
+        // successful seal, so a failed seal is as invisible as dropping the
+        // freshly-sealed Vec used to be.
+        let mut ct = std::mem::take(this.ct);
+        if let Err(e) = this.cipher.seal_into(aad, input, &mut ct) {
+            *this.ct = ct;
+            return Err(IoError::other(e));
+        }
         let (len, written) = if last {
             (0, 0)
         } else {
@@ -221,23 +254,35 @@ impl<D: AsyncWrite, C: Encrypt> ChunkWriter<D, C> {
         let w = match this.dst.as_mut().poll_write(cx, len) {
             Poll::Pending => 0,
             Poll::Ready(Ok(w)) => w,
-            Poll::Ready(e @ Err(_)) => return e,
+            Poll::Ready(e @ Err(_)) => {
+                *this.ct = ct;
+                return e;
+            }
         };
 
         if w < len.len() {
             this.buf.extend_from_slice(&len[w..]);
             this.buf.append(&mut ct);
         } else {
+            // `buf` is empty here: `poll_write`/`poll_close` drain it
+            // before calling us.  Copying the residue into `buf` (rather
+            // than moving/splitting the sealed Vec) keeps both allocations
+            // stable across chunks.
             match this.dst.as_mut().poll_write(cx, &ct[..]) {
                 Poll::Pending => {
-                    *this.buf = ct;
+                    this.buf.extend_from_slice(&ct[..]);
                 }
                 Poll::Ready(Ok(w)) => {
-                    *this.buf = ct.split_off(w);
+                    this.buf.extend_from_slice(&ct[w..]);
                 }
-                Poll::Ready(e @ Err(_)) => return e,
+                Poll::Ready(e @ Err(_)) => {
+                    *this.ct = ct;
+                    return e;
+                }
             }
         }
+        ct.clear();
+        *this.ct = ct;
         Ok(written)
     }
 }
@@ -322,6 +367,7 @@ impl<D> ClientRequest<D> {
                 dst,
                 cipher: AnySenderCipher::Base(hpke),
                 buf: header,
+                ct: Vec::new(),
                 closed: false,
             },
         })
@@ -350,6 +396,7 @@ impl<D> ClientRequest<D> {
                 dst,
                 cipher: AnySenderCipher::Auth(hpke),
                 buf: header,
+                ct: Vec::new(),
                 closed: false,
             },
         })
@@ -594,13 +641,17 @@ impl ChunkReader {
             Poll::Ready(Ok(0)) => Some(ioerror(Error::Truncated)),
             Poll::Ready(Ok(r)) => {
                 if r == *length {
-                    let pt = match aead.open(CHUNK_AAD, &output[..r]) {
+                    // Decrypt in place inside `output`: no temporary Vec,
+                    // no copy-back.  On failure `output` is scribbled and
+                    // must be treated as dead; the error return means no
+                    // consumer sees it (the old path left the buffer
+                    // untouched on failure).
+                    let pt = match aead.open_in_place(CHUNK_AAD, &mut output[..r]) {
                         Ok(pt) => pt,
                         Err(e) => return Some(ioerror(e)),
                     };
-                    output[..pt.len()].copy_from_slice(&pt);
                     *self = Self::length();
-                    Some(Poll::Ready(Ok(pt.len())))
+                    Some(Poll::Ready(Ok(pt)))
                 } else {
                     buf.reserve_exact(*length);
                     buf.extend_from_slice(&output[..r]);
@@ -916,6 +967,7 @@ impl<S> ServerRequest<S> {
                 dst,
                 cipher: aead,
                 buf: response_nonce,
+                ct: Vec::new(),
                 closed: false,
             },
         })
@@ -960,6 +1012,7 @@ impl ServerResponseEncapsulator {
                 dst,
                 cipher: self.aead,
                 buf: self.response_nonce,
+                ct: Vec::new(),
                 closed: false,
             },
         })
