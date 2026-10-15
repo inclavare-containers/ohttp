@@ -11,6 +11,7 @@ pub trait Decrypt {
     /// treat the buffer as dead whenever `Err` is returned (the chunk
     /// stream aborts on failure and never hands the buffer onward), whereas
     /// `open` leaves its input untouched.
+    #[allow(dead_code)] // Used by stream feature.
     fn open_in_place(&mut self, aad: &[u8], in_out: &mut [u8]) -> Res<usize> {
         let pt = self.open(aad, &*in_out)?;
         let len = pt.len();
@@ -27,6 +28,7 @@ pub trait Encrypt {
     /// that override this) reusing its allocation.  The default moves the
     /// result of `seal` into `out`, so non-overriding backends keep today's
     /// one-allocation-per-chunk cost with no extra copy.
+    #[allow(dead_code)] // Used by stream feature.
     fn seal_into(&mut self, aad: &[u8], pt: &[u8], out: &mut Vec<u8>) -> Res<()> {
         *out = self.seal(aad, pt)?;
         Ok(())
