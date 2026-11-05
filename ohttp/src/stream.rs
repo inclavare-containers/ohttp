@@ -14,6 +14,7 @@ use pin_project::pin_project;
 #[cfg(feature = "aws-lc")]
 use crate::al::hpke::Exporter;
 use crate::hpke::Aead as AeadId;
+use crate::hpke::{Kdf, Kem};
 #[cfg(feature = "nss")]
 use crate::nss::hpke::Exporter;
 #[cfg(all(feature = "rust-hpke", not(feature = "aws-lc")))]
@@ -24,7 +25,7 @@ use crate::{
     entropy,
     err::Res,
     export_secret, make_aead, random, Aead, Error, HpkeConfig, HpkeR, HpkeS, KeyConfig, KeyId,
-    Mode, PublicKey, SymKey, REQUEST_HEADER_LEN,
+    Mode, PublicKey, SymKey, SymmetricSuite, REQUEST_HEADER_LEN,
 };
 #[cfg(feature = "rust-hpke")]
 use crate::{AuthHpkeR, AuthHpkeS, PrivateKey};
@@ -859,6 +860,28 @@ impl<S> HeaderDecodedServerRequest<S> {
         self.key_id
     }
 
+    /// The symmetric suite carried by the request header.
+    ///
+    /// `decode_header` has already buffered `key_id || kem_id || kdf_id ||
+    /// aead_id`.  An incomplete buffer or an unknown identifier is an error,
+    /// never a panic.
+    pub fn symmetric_suite(&self) -> Res<SymmetricSuite> {
+        use byteorder::{NetworkEndian, ReadBytesExt as _};
+
+        let ServerRequestState::HpkeConfig { buf, read } = &self.state else {
+            return Err(Error::NotReady);
+        };
+        if *read != REQUEST_HEADER_LEN {
+            return Err(Error::Truncated);
+        }
+        let mut r = Cursor::new(&buf[..]);
+        r.read_u8()?; // key_id
+        Kem::try_from(r.read_u16::<NetworkEndian>()?)?;
+        let kdf = Kdf::try_from(r.read_u16::<NetworkEndian>()?)?;
+        let aead = AeadId::try_from(r.read_u16::<NetworkEndian>()?)?;
+        Ok(SymmetricSuite::new(kdf, aead))
+    }
+
     pub fn into_server_request(self, key_config: KeyConfig) -> ServerRequest<S> {
         assert!(key_config.sk.is_some());
         let (buf, read) = self.state.into_hpke_config_buf_read();
@@ -1257,9 +1280,11 @@ mod test {
     use pin_project::pin_project;
     use sync_async::{Dribble, Pipe, SplitAt, Stutter, SyncRead, SyncResolve, Unadapt};
 
+    use super::{HeaderDecodedServerRequest, ServerRequestState};
     use crate::{
+        hpke::{Aead as AeadId, Kdf},
         test::{init, make_config, REQUEST, RESPONSE},
-        ClientRequest, Server,
+        ClientRequest, Error, Server, SymmetricSuite,
     };
 
     #[test]
@@ -1539,6 +1564,55 @@ mod test {
         trace!("Encapsulated Request: {}", hex::encode(&enc_request)); // The server receives a request.
         let mut server_request = server.decapsulate_stream(&enc_request[..]);
         assert_eq!(server_request.sync_read_to_end(), LONG_REQUEST);
+    }
+
+    #[test]
+    fn decode_header_symmetric_suite() {
+        init();
+
+        let server_config = make_config();
+        let encoded_config = server_config.encode().unwrap();
+        let client = ClientRequest::from_encoded_config(&encoded_config).unwrap();
+        let (mut request_read, request_write) = Pipe::new();
+        let client_request = client.encapsulate_stream(request_write).unwrap();
+        let _ = write_wrapped(client_request, StutterDribble::new, REQUEST);
+        let enc_request = request_read.sync_read_to_end();
+
+        let header = {
+            let future = Server::decode_header(&enc_request[..]);
+            std::pin::pin!(future).sync_resolve().unwrap()
+        };
+        assert_eq!(
+            header.symmetric_suite().unwrap(),
+            SymmetricSuite::new(Kdf::HkdfSha256, AeadId::Aes128Gcm)
+        );
+    }
+
+    #[test]
+    fn header_symmetric_suite_rejects_short_and_invalid() {
+        let hdr = |read, buf| HeaderDecodedServerRequest {
+            key_id: 1,
+            src: (),
+            state: ServerRequestState::HpkeConfig { buf, read },
+        };
+
+        // key_id=1, kem=32, kdf=1, aead=2, but only three bytes were read.
+        assert!(matches!(
+            hdr(3, [0x01, 0x00, 0x20, 0x00, 0x01, 0x00, 0x02]).symmetric_suite(),
+            Err(Error::Truncated)
+        ));
+
+        // A complete header naming an unknown KEM.
+        assert!(matches!(
+            hdr(7, [0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x02]).symmetric_suite(),
+            Err(Error::Unsupported)
+        ));
+
+        // A complete header naming an unknown AEAD.
+        assert!(matches!(
+            hdr(7, [0x01, 0x00, 0x20, 0x00, 0x01, 0x00, 0x09]).symmetric_suite(),
+            Err(Error::Unsupported)
+        ));
     }
 
     /// Run the `request_response` test, but do it with streams that are one byte apiece

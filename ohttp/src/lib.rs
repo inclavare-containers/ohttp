@@ -133,6 +133,19 @@ impl ClientRequest {
         })
     }
 
+    /// Construct a `ClientRequest` from a `KeyConfig`, using the given
+    /// symmetric suite.  Fails with `Error::Unsupported` if the config does
+    /// not include that suite.
+    pub fn from_config_with_suite(config: &KeyConfig, suite: SymmetricSuite) -> Res<Self> {
+        let selected = config.select(suite)?;
+        Ok(Self {
+            key_id: config.key_id,
+            config: selected,
+            pk: config.pk.clone(),
+            sk_s: None,
+        })
+    }
+
     /// Construct a ClientRequest that uses HPKE Auth mode with the given client private key.
     pub fn from_config_with_client_key(config: &mut KeyConfig, client_sk: PrivateKey) -> Res<Self> {
         let selected = config.select(config.symmetric[0])?;
@@ -150,6 +163,23 @@ impl ClientRequest {
         client_sk_bytes: &[u8],
     ) -> Res<Self> {
         let selected = config.select(config.symmetric[0])?;
+        let sk = PrivateKey::from_x25519_bytes(client_sk_bytes)?;
+        Ok(Self {
+            key_id: config.key_id,
+            config: selected,
+            pk: config.pk.clone(),
+            sk_s: Some(sk),
+        })
+    }
+
+    /// Construct a `ClientRequest` with a client private key provided as raw
+    /// X25519 bytes, using the given symmetric suite.
+    pub fn from_config_with_client_key_bytes_and_suite(
+        config: &KeyConfig,
+        suite: SymmetricSuite,
+        client_sk_bytes: &[u8],
+    ) -> Res<Self> {
+        let selected = config.select(suite)?;
         let sk = PrivateKey::from_x25519_bytes(client_sk_bytes)?;
         Ok(Self {
             key_id: config.key_id,
@@ -731,6 +761,104 @@ mod test {
 
         let response = client_response.decapsulate(&enc_response).unwrap();
         assert_eq!(&response[..], RESPONSE);
+    }
+
+    fn aes256_suite() -> SymmetricSuite {
+        SymmetricSuite::new(Kdf::HkdfSha256, Aead::Aes256Gcm)
+    }
+
+    #[test]
+    fn request_response_aes256_gcm() {
+        init();
+
+        let suite = aes256_suite();
+        let server_config = KeyConfig::new(KEY_ID, KEM, vec![suite]).unwrap();
+        let server = Server::new(server_config).unwrap();
+        let encoded_config = server.config().encode().unwrap();
+        let config = KeyConfig::decode(&encoded_config).unwrap();
+
+        let client = ClientRequest::from_config_with_suite(&config, suite).unwrap();
+        let (enc_request, client_response) = client.encapsulate(REQUEST).unwrap();
+        let (request, server_response) = server.decapsulate(&enc_request).unwrap();
+        assert_eq!(&request[..], REQUEST);
+
+        let enc_response = server_response.encapsulate(RESPONSE).unwrap();
+        let response = client_response.decapsulate(&enc_response).unwrap();
+        assert_eq!(&response[..], RESPONSE);
+    }
+
+    #[allow(clippy::similar_names)] // for client_sk and client_pk
+    #[test]
+    fn request_response_aes256_gcm_auth_mode() {
+        init();
+
+        let suite = aes256_suite();
+        let server_config = KeyConfig::new(KEY_ID, KEM, vec![suite]).unwrap();
+        let server = Server::new(server_config).unwrap();
+        let encoded_config = server.config().encode().unwrap();
+        let config = KeyConfig::decode(&encoded_config).unwrap();
+
+        let (client_sk, client_pk) = generate_key_pair(KEM).unwrap();
+        let client = ClientRequest::from_config_with_client_key_bytes_and_suite(
+            &config,
+            suite,
+            &client_sk.key_data().unwrap(),
+        )
+        .unwrap();
+        let (enc_request, client_response) = client.encapsulate(REQUEST).unwrap();
+        let (request, server_response) = server
+            .decapsulate_with_client_pk(&enc_request, &client_pk)
+            .unwrap();
+        assert_eq!(&request[..], REQUEST);
+
+        let enc_response = server_response.encapsulate(RESPONSE).unwrap();
+        let response = client_response.decapsulate(&enc_response).unwrap();
+        assert_eq!(&response[..], RESPONSE);
+    }
+
+    /// The request header is `key_id || kem_id || kdf_id || aead_id`, and
+    /// only the trailing `aead_id` varies with the selected suite.
+    #[test]
+    fn request_header_encodes_aead_id() {
+        init();
+
+        for aead in [Aead::Aes128Gcm, Aead::Aes256Gcm, Aead::ChaCha20Poly1305] {
+            let suite = SymmetricSuite::new(Kdf::HkdfSha256, aead);
+            let config = KeyConfig::new(KEY_ID, KEM, vec![suite]).unwrap();
+            let encoded_config = config.encode().unwrap();
+            let config = KeyConfig::decode(&encoded_config).unwrap();
+
+            let client = ClientRequest::from_config_with_suite(&config, suite).unwrap();
+            let (enc_request, _) = client.encapsulate(REQUEST).unwrap();
+            assert_eq!(
+                &enc_request[..5],
+                &[KEY_ID, 0x00, 0x20, 0x00, 0x01],
+                "header prefix must not depend on the AEAD"
+            );
+            assert_eq!(&enc_request[5..7], &u16::from(aead).to_be_bytes());
+        }
+    }
+
+    #[test]
+    fn from_config_with_suite_rejects_suite_not_in_config() {
+        init();
+
+        let config = make_config();
+        let missing = aes256_suite();
+        assert!(matches!(
+            ClientRequest::from_config_with_suite(&config, missing),
+            Err(Error::Unsupported)
+        ));
+
+        let (client_sk, _) = generate_key_pair(KEM).unwrap();
+        assert!(matches!(
+            ClientRequest::from_config_with_client_key_bytes_and_suite(
+                &config,
+                missing,
+                &client_sk.key_data().unwrap()
+            ),
+            Err(Error::Unsupported)
+        ));
     }
 
     #[test]
