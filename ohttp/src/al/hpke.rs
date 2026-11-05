@@ -31,22 +31,27 @@ pub struct Config {
 }
 
 impl Config {
+    #[must_use]
     pub fn new(kem: Kem, kdf: Kdf, aead: Aead) -> Self {
         Self { kem, kdf, aead }
     }
 
+    #[must_use]
     pub fn kem(self) -> Kem {
         self.kem
     }
 
+    #[must_use]
     pub fn kdf(self) -> Kdf {
         self.kdf
     }
 
+    #[must_use]
     pub fn aead(self) -> Aead {
         self.aead
     }
 
+    #[must_use]
     pub fn supported(self) -> bool {
         self.kdf == Kdf::HkdfSha256
             && matches!(

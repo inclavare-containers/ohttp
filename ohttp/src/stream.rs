@@ -13,8 +13,7 @@ use pin_project::pin_project;
 
 #[cfg(feature = "aws-lc")]
 use crate::al::hpke::Exporter;
-use crate::hpke::Aead as AeadId;
-use crate::hpke::{Kdf, Kem};
+use crate::hpke::{Aead as AeadId, Kdf, Kem};
 #[cfg(feature = "nss")]
 use crate::nss::hpke::Exporter;
 #[cfg(all(feature = "rust-hpke", not(feature = "aws-lc")))]
@@ -35,26 +34,62 @@ pub(crate) const INFO_REQUEST: &[u8] = b"message/bhttp chunked request";
 /// The exporter label for a chunked response.
 pub(crate) const LABEL_RESPONSE: &[u8] = b"message/bhttp chunked response";
 /// The length of the plaintext of the largest chunk that is permitted.
-const MAX_CHUNK_PLAINTEXT: usize = 1 << 14;
-const CHUNK_AAD: &[u8] = b"";
-const FINAL_CHUNK_AAD: &[u8] = b"final";
+pub(crate) const MAX_CHUNK_PLAINTEXT: usize = 1 << 14;
+pub(crate) const CHUNK_AAD: &[u8] = b"";
+pub(crate) const FINAL_CHUNK_AAD: &[u8] = b"final";
 const MAX_ENTROPY_LEN: usize = 32;
 
-enum AnySenderCipher {
+/// Encode a chunk length as the chunked-ohttp varint (big-endian, the top two
+/// bits of the first byte select the width).  Shared by [`ChunkWriter`] and the
+/// WebSocket chunk stream so the two framings cannot drift apart.
+pub(crate) fn chunk_write_len(w: &mut [u8], len: usize) -> &[u8] {
+    let v: u64 = len.try_into().unwrap();
+    let (v, len) = match () {
+        () if v < (1 << 6) => (v, 1),
+        () if v < (1 << 14) => (v | (1 << 14), 2),
+        () if v < (1 << 30) => (v | (2 << 30), 4),
+        () if v < (1 << 62) => (v | (3 << 62), 8),
+        () => panic!("varint value too large"),
+    };
+    w[..len].copy_from_slice(&v.to_be_bytes()[(8 - len)..]);
+    &w[..len]
+}
+
+/// Decode the chunked-ohttp varint written by [`chunk_write_len`], returning the
+/// value and the number of bytes it occupies.  `Error::Truncated` when the
+/// buffer does not hold the whole prefix.
+pub(crate) fn chunk_read_len(b: &[u8]) -> Res<(usize, usize)> {
+    let first = *b.first().ok_or(Error::Truncated)?;
+    let width = match first >> 6 {
+        0 => 1,
+        1 => 2,
+        2 => 4,
+        _ => 8,
+    };
+    let buf = b.get(..width).ok_or(Error::Truncated)?;
+    let mut bytes = [0u8; 8];
+    bytes[8 - width..].copy_from_slice(buf);
+    // Clear the width tag from the top bits of the first byte.
+    bytes[8 - width] &= 0x3f;
+    let v = u64::from_be_bytes(bytes);
+    Ok((v.try_into().map_err(|_| Error::Format)?, width))
+}
+
+pub(crate) enum AnySenderCipher {
     Base(HpkeS),
     #[cfg(feature = "rust-hpke")]
     Auth(AuthHpkeS),
 }
 
 impl AnySenderCipher {
-    fn config(&self) -> HpkeConfig {
+    pub(crate) fn config(&self) -> HpkeConfig {
         match self {
             AnySenderCipher::Base(s) => s.config(),
             #[cfg(feature = "rust-hpke")]
             AnySenderCipher::Auth(s) => s.config(),
         }
     }
-    fn enc(&self) -> Res<Vec<u8>> {
+    pub(crate) fn enc(&self) -> Res<Vec<u8>> {
         match self {
             AnySenderCipher::Base(s) => s.enc(),
             #[cfg(feature = "rust-hpke")]
@@ -101,7 +136,7 @@ impl Exporter for AnySenderCipher {
     }
 }
 
-enum AnyReceiverCipher {
+pub(crate) enum AnyReceiverCipher {
     Base(HpkeR),
     #[cfg(feature = "rust-hpke")]
     Auth(AuthHpkeR),
@@ -177,16 +212,7 @@ struct ChunkWriter<D, E> {
 
 impl<D, E> ChunkWriter<D, E> {
     fn write_len(w: &mut [u8], len: usize) -> &[u8] {
-        let v: u64 = len.try_into().unwrap();
-        let (v, len) = match () {
-            () if v < (1 << 6) => (v, 1),
-            () if v < (1 << 14) => (v | (1 << 14), 2),
-            () if v < (1 << 30) => (v | (2 << 30), 4),
-            () if v < (1 << 62) => (v | (3 << 62), 8),
-            () => panic!("varint value too large"),
-        };
-        w[..len].copy_from_slice(&v.to_be_bytes()[(8 - len)..]);
-        &w[..len]
+        chunk_write_len(w, len)
     }
 }
 
@@ -401,6 +427,12 @@ impl<D> ClientRequest<D> {
                 closed: false,
             },
         })
+    }
+
+    /// The header bytes `start` has queued ahead of the body.
+    #[cfg(test)]
+    pub(crate) fn header(&self) -> &[u8] {
+        &self.writer.buf
     }
 
     /// Get an object that can be used to process the response.

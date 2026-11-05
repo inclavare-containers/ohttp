@@ -9,6 +9,10 @@ compile_error!("features \"nss\" and \"rust-hpke\" are mutually incompatible");
 
 #[cfg(feature = "aws-lc")]
 mod al;
+/// Sealed record primitives for transports that relay a byte stream as
+/// chunked-ohttp records in both directions instead of a bhttp message.
+#[cfg(feature = "stream")]
+pub mod chunk;
 mod config;
 mod crypto;
 mod err;
@@ -43,7 +47,9 @@ use crypto::{Decrypt, Encrypt};
 use log::trace;
 
 #[cfg(feature = "aws-lc")]
-pub use crate::al::hpke::PublicKey;
+pub use crate::al::hpke::{Config as HpkeConfig, PrivateKey, PublicKey};
+#[cfg(all(feature = "stream", feature = "server"))]
+pub use crate::chunk::DecodedHeader;
 #[cfg(feature = "nss")]
 use crate::nss::{
     aead::{Aead, Mode, NONCE_LEN},
@@ -52,7 +58,7 @@ use crate::nss::{
     random, PrivateKey, PublicKey, SymKey,
 };
 #[cfg(all(feature = "rust-hpke", not(feature = "aws-lc")))]
-pub use crate::rh::hpke::PublicKey;
+pub use crate::rh::hpke::{Config as HpkeConfig, PrivateKey, PublicKey};
 #[cfg(feature = "stream")]
 use crate::stream::{ClientRequest as StreamClient, ServerRequest as ServerRequestStream};
 #[cfg(feature = "aws-lc")]
@@ -60,7 +66,7 @@ use crate::{
     al::{
         aead::{Aead, Mode, NONCE_LEN},
         hkdf::{Hkdf, KeyMechanism},
-        hpke::{AuthHpkeR, AuthHpkeS, Config as HpkeConfig, Exporter, HpkeR, HpkeS, PrivateKey},
+        hpke::{AuthHpkeR, AuthHpkeS, Exporter, HpkeR, HpkeS},
         SymKey,
     },
     rand::random,
@@ -76,7 +82,7 @@ use crate::{
     rh::{
         aead::{Aead, Mode, NONCE_LEN},
         hkdf::{Hkdf, KeyMechanism},
-        hpke::{AuthHpkeR, AuthHpkeS, Config as HpkeConfig, Exporter, HpkeR, HpkeS, PrivateKey},
+        hpke::{AuthHpkeR, AuthHpkeS, Exporter, HpkeR, HpkeS},
         SymKey,
     },
 };
