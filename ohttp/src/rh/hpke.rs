@@ -5,7 +5,7 @@ use ::rand::rng;
 use log::{error, trace};
 use pkcs8::{der::Encode, spki::AlgorithmIdentifier, ObjectIdentifier, PrivateKeyInfo};
 use rust_hpke::{
-    aead::{AeadCtxR, AeadCtxS, AeadTag, AesGcm128, ChaCha20Poly1305},
+    aead::{AeadCtxR, AeadCtxS, AeadTag, AesGcm128, AesGcm256, ChaCha20Poly1305},
     kdf::HkdfSha256,
     kem::{Kem as KemTrait, X25519HkdfSha256},
     setup_receiver, setup_sender, Deserializable, OpModeR, OpModeS, Serializable,
@@ -45,7 +45,11 @@ impl Config {
 
     pub fn supported(self) -> bool {
         // TODO support more options
-        self.kdf == Kdf::HkdfSha256 && matches!(self.aead, Aead::Aes128Gcm | Aead::ChaCha20Poly1305)
+        self.kdf == Kdf::HkdfSha256
+            && matches!(
+                self.aead,
+                Aead::Aes128Gcm | Aead::Aes256Gcm | Aead::ChaCha20Poly1305
+            )
     }
 }
 
@@ -173,6 +177,7 @@ impl PrivateKey {
 // This is what a macro that uses concat_ident!() might produce, written out in full.
 enum SenderContextX25519HkdfSha256HkdfSha256 {
     AesGcm128(Box<AeadCtxS<AesGcm128, HkdfSha256, X25519HkdfSha256>>),
+    AesGcm256(Box<AeadCtxS<AesGcm256, HkdfSha256, X25519HkdfSha256>>),
     ChaCha20Poly1305(Box<AeadCtxS<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>>),
 }
 
@@ -194,6 +199,12 @@ impl SenderContext {
                 Vec::from(tag.to_bytes().as_slice())
             }
             Self::X25519HkdfSha256(SenderContextX25519HkdfSha256::HkdfSha256(
+                SenderContextX25519HkdfSha256HkdfSha256::AesGcm256(context),
+            )) => {
+                let tag = context.seal_in_place_detached(plaintext, aad)?;
+                Vec::from(tag.to_bytes().as_slice())
+            }
+            Self::X25519HkdfSha256(SenderContextX25519HkdfSha256::HkdfSha256(
                 SenderContextX25519HkdfSha256HkdfSha256::ChaCha20Poly1305(context),
             )) => {
                 let tag = context.seal_in_place_detached(plaintext, aad)?;
@@ -206,6 +217,11 @@ impl SenderContext {
         match self {
             Self::X25519HkdfSha256(SenderContextX25519HkdfSha256::HkdfSha256(
                 SenderContextX25519HkdfSha256HkdfSha256::AesGcm128(context),
+            )) => {
+                context.export(info, out_buf)?;
+            }
+            Self::X25519HkdfSha256(SenderContextX25519HkdfSha256::HkdfSha256(
+                SenderContextX25519HkdfSha256HkdfSha256::AesGcm256(context),
             )) => {
                 context.export(info, out_buf)?;
             }
@@ -285,6 +301,15 @@ impl HpkeS {
             {
                 Kem::X25519Sha256 => X25519HkdfSha256,
                 Kdf::HkdfSha256 => HkdfSha256,
+                Aead::Aes256Gcm => AesGcm256,
+                PublicKey::X25519,
+                SenderContext::X25519HkdfSha256,
+                SenderContextX25519HkdfSha256::HkdfSha256,
+                SenderContextX25519HkdfSha256HkdfSha256::AesGcm256,
+            },
+            {
+                Kem::X25519Sha256 => X25519HkdfSha256,
+                Kdf::HkdfSha256 => HkdfSha256,
                 Aead::ChaCha20Poly1305 => ChaCha20Poly1305,
                 PublicKey::X25519,
                 SenderContext::X25519HkdfSha256,
@@ -341,6 +366,7 @@ impl Deref for HpkeS {
 
 enum ReceiverContextX25519HkdfSha256HkdfSha256 {
     AesGcm128(Box<AeadCtxR<AesGcm128, HkdfSha256, X25519HkdfSha256>>),
+    AesGcm256(Box<AeadCtxR<AesGcm256, HkdfSha256, X25519HkdfSha256>>),
     ChaCha20Poly1305(Box<AeadCtxR<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>>),
 }
 
@@ -368,6 +394,18 @@ impl ReceiverContext {
                 ct
             }
             Self::X25519HkdfSha256(ReceiverContextX25519HkdfSha256::HkdfSha256(
+                ReceiverContextX25519HkdfSha256HkdfSha256::AesGcm256(context),
+            )) => {
+                if ciphertext.len() < AeadTag::<AesGcm256>::size() {
+                    return Err(Error::Truncated);
+                }
+                let (ct, tag_slice) =
+                    ciphertext.split_at_mut(ciphertext.len() - AeadTag::<AesGcm256>::size());
+                let tag = AeadTag::<AesGcm256>::from_bytes(tag_slice)?;
+                context.open_in_place_detached(ct, aad, &tag)?;
+                ct
+            }
+            Self::X25519HkdfSha256(ReceiverContextX25519HkdfSha256::HkdfSha256(
                 ReceiverContextX25519HkdfSha256HkdfSha256::ChaCha20Poly1305(context),
             )) => {
                 if ciphertext.len() < AeadTag::<ChaCha20Poly1305>::size() {
@@ -386,6 +424,11 @@ impl ReceiverContext {
         match self {
             Self::X25519HkdfSha256(ReceiverContextX25519HkdfSha256::HkdfSha256(
                 ReceiverContextX25519HkdfSha256HkdfSha256::AesGcm128(context),
+            )) => {
+                context.export(info, out_buf)?;
+            }
+            Self::X25519HkdfSha256(ReceiverContextX25519HkdfSha256::HkdfSha256(
+                ReceiverContextX25519HkdfSha256HkdfSha256::AesGcm256(context),
             )) => {
                 context.export(info, out_buf)?;
             }
@@ -462,6 +505,15 @@ impl HpkeR {
             {
                 Kem::X25519Sha256 => X25519HkdfSha256,
                 Kdf::HkdfSha256 => HkdfSha256,
+                Aead::Aes256Gcm => AesGcm256,
+                PrivateKey::X25519,
+                ReceiverContext::X25519HkdfSha256,
+                ReceiverContextX25519HkdfSha256::HkdfSha256,
+                ReceiverContextX25519HkdfSha256HkdfSha256::AesGcm256,
+            },
+            {
+                Kem::X25519Sha256 => X25519HkdfSha256,
+                Kdf::HkdfSha256 => HkdfSha256,
                 Aead::ChaCha20Poly1305 => ChaCha20Poly1305,
                 PrivateKey::X25519,
                 ReceiverContext::X25519HkdfSha256,
@@ -520,6 +572,7 @@ impl Deref for HpkeR {
 #[allow(dead_code)]
 enum AuthSenderContextX25519HkdfSha256HkdfSha256 {
     AesGcm128(Box<AeadCtxS<AesGcm128, HkdfSha256, X25519HkdfSha256>>),
+    AesGcm256(Box<AeadCtxS<AesGcm256, HkdfSha256, X25519HkdfSha256>>),
     ChaCha20Poly1305(Box<AeadCtxS<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>>),
 }
 
@@ -543,6 +596,12 @@ impl AuthSenderContext {
                 Vec::from(tag.to_bytes().as_slice())
             }
             Self::X25519HkdfSha256(AuthSenderContextX25519HkdfSha256::HkdfSha256(
+                AuthSenderContextX25519HkdfSha256HkdfSha256::AesGcm256(context),
+            )) => {
+                let tag = context.seal_in_place_detached(plaintext, aad)?;
+                Vec::from(tag.to_bytes().as_slice())
+            }
+            Self::X25519HkdfSha256(AuthSenderContextX25519HkdfSha256::HkdfSha256(
                 AuthSenderContextX25519HkdfSha256HkdfSha256::ChaCha20Poly1305(context),
             )) => {
                 let tag = context.seal_in_place_detached(plaintext, aad)?;
@@ -555,6 +614,11 @@ impl AuthSenderContext {
         match self {
             Self::X25519HkdfSha256(AuthSenderContextX25519HkdfSha256::HkdfSha256(
                 AuthSenderContextX25519HkdfSha256HkdfSha256::AesGcm128(context),
+            )) => {
+                context.export(info, out_buf)?;
+            }
+            Self::X25519HkdfSha256(AuthSenderContextX25519HkdfSha256::HkdfSha256(
+                AuthSenderContextX25519HkdfSha256HkdfSha256::AesGcm256(context),
             )) => {
                 context.export(info, out_buf)?;
             }
@@ -637,6 +701,16 @@ impl AuthHpkeS {
             {
                 Kem::X25519Sha256 => X25519HkdfSha256,
                 Kdf::HkdfSha256 => HkdfSha256,
+                Aead::Aes256Gcm => AesGcm256,
+                PublicKey::X25519,
+                PrivateKey::X25519,
+                AuthSenderContext::X25519HkdfSha256,
+                AuthSenderContextX25519HkdfSha256::HkdfSha256,
+                AuthSenderContextX25519HkdfSha256HkdfSha256::AesGcm256,
+            },
+            {
+                Kem::X25519Sha256 => X25519HkdfSha256,
+                Kdf::HkdfSha256 => HkdfSha256,
                 Aead::ChaCha20Poly1305 => ChaCha20Poly1305,
                 PublicKey::X25519,
                 PrivateKey::X25519,
@@ -697,6 +771,7 @@ impl Deref for AuthHpkeS {
 #[allow(dead_code)]
 enum AuthReceiverContextX25519HkdfSha256HkdfSha256 {
     AesGcm128(Box<AeadCtxR<AesGcm128, HkdfSha256, X25519HkdfSha256>>),
+    AesGcm256(Box<AeadCtxR<AesGcm256, HkdfSha256, X25519HkdfSha256>>),
     ChaCha20Poly1305(Box<AeadCtxR<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>>),
 }
 
@@ -726,6 +801,18 @@ impl AuthReceiverContext {
                 ct
             }
             Self::X25519HkdfSha256(AuthReceiverContextX25519HkdfSha256::HkdfSha256(
+                AuthReceiverContextX25519HkdfSha256HkdfSha256::AesGcm256(context),
+            )) => {
+                if ciphertext.len() < AeadTag::<AesGcm256>::size() {
+                    return Err(Error::Truncated);
+                }
+                let (ct, tag_slice) =
+                    ciphertext.split_at_mut(ciphertext.len() - AeadTag::<AesGcm256>::size());
+                let tag = AeadTag::<AesGcm256>::from_bytes(tag_slice)?;
+                context.open_in_place_detached(ct, aad, &tag)?;
+                ct
+            }
+            Self::X25519HkdfSha256(AuthReceiverContextX25519HkdfSha256::HkdfSha256(
                 AuthReceiverContextX25519HkdfSha256HkdfSha256::ChaCha20Poly1305(context),
             )) => {
                 if ciphertext.len() < AeadTag::<ChaCha20Poly1305>::size() {
@@ -744,6 +831,11 @@ impl AuthReceiverContext {
         match self {
             Self::X25519HkdfSha256(AuthReceiverContextX25519HkdfSha256::HkdfSha256(
                 AuthReceiverContextX25519HkdfSha256HkdfSha256::AesGcm128(context),
+            )) => {
+                context.export(info, out_buf)?;
+            }
+            Self::X25519HkdfSha256(AuthReceiverContextX25519HkdfSha256::HkdfSha256(
+                AuthReceiverContextX25519HkdfSha256HkdfSha256::AesGcm256(context),
             )) => {
                 context.export(info, out_buf)?;
             }
@@ -824,6 +916,16 @@ impl AuthHpkeR {
                 AuthReceiverContext::X25519HkdfSha256,
                 AuthReceiverContextX25519HkdfSha256::HkdfSha256,
                 AuthReceiverContextX25519HkdfSha256HkdfSha256::AesGcm128,
+            },
+            {
+                Kem::X25519Sha256 => X25519HkdfSha256,
+                Kdf::HkdfSha256 => HkdfSha256,
+                Aead::Aes256Gcm => AesGcm256,
+                PrivateKey::X25519,
+                PublicKey::X25519,
+                AuthReceiverContext::X25519HkdfSha256,
+                AuthReceiverContextX25519HkdfSha256::HkdfSha256,
+                AuthReceiverContextX25519HkdfSha256HkdfSha256::AesGcm256,
             },
             {
                 Kem::X25519Sha256 => X25519HkdfSha256,
@@ -933,11 +1035,19 @@ pub fn derive_key_pair(kem: Kem, ikm: &[u8]) -> Res<(PrivateKey, PublicKey)> {
 
 #[cfg(test)]
 mod test {
-    use super::{generate_key_pair, AuthHpkeR, AuthHpkeS, Config, HpkeR, HpkeS};
+    use super::{
+        generate_key_pair, AuthHpkeR, AuthHpkeS, Config, HpkeR, HpkeS, PrivateKey, PublicKey,
+    };
     use crate::{
         crypto::{Decrypt, Encrypt},
-        hpke::{Aead, Kem},
+        hpke::{Aead, Kdf, Kem},
         init,
+    };
+    use ::hpke::{
+        aead::AesGcm256,
+        kdf::HkdfSha256,
+        kem::{Kem as KemTrait, X25519HkdfSha256},
+        setup_sender, Deserializable, OpModeS, Serializable,
     };
 
     const INFO: &[u8] = b"info";
@@ -980,6 +1090,11 @@ mod test {
     #[test]
     fn seal_open_gcm() {
         seal_open(Aead::Aes128Gcm, Kem::X25519Sha256);
+    }
+
+    #[test]
+    fn seal_open_gcm256() {
+        seal_open(Aead::Aes256Gcm, Kem::X25519Sha256);
     }
 
     #[test]
@@ -1028,7 +1143,163 @@ mod test {
     }
 
     #[test]
+    fn auth_seal_open_gcm256() {
+        auth_seal_open(Aead::Aes256Gcm, Kem::X25519Sha256);
+    }
+
+    #[test]
     fn auth_seal_open_chacha() {
         auth_seal_open(Aead::ChaCha20Poly1305, Kem::X25519Sha256);
+    }
+
+    // AES-256-GCM known-answer tests.
+    //
+    // RFC 9180 Appendix A has no AES-256-GCM entry, so these come from the
+    // official HPKE interop vectors (cfrg/hpke `test-vectors-5f503c5.json`),
+    // entries with kem_id=32, kdf_id=1 and aead_id=2 in Base and Auth mode.
+    // Only the fields the tests assert are vendored.
+
+    fn unhex(s: &str) -> Vec<u8> {
+        hex::decode(s).expect("valid hex")
+    }
+
+    /// A csprng that hands out a fixed byte string.  `setup_sender` draws the
+    /// ephemeral keying material once, so feeding it the vector's `ikmE`
+    /// reproduces the vector's `enc`.
+    struct FixedRng {
+        bytes: Vec<u8>,
+        pos: usize,
+    }
+
+    impl FixedRng {
+        fn new(hex_str: &str) -> Self {
+            Self {
+                bytes: unhex(hex_str),
+                pos: 0,
+            }
+        }
+    }
+
+    impl ::hpke::rand_core::RngCore for FixedRng {
+        fn next_u32(&mut self) -> u32 {
+            let mut b = [0u8; 4];
+            self.fill_bytes(&mut b);
+            u32::from_le_bytes(b)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            let mut b = [0u8; 8];
+            self.fill_bytes(&mut b);
+            u64::from_le_bytes(b)
+        }
+
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            for d in dest {
+                *d = self.bytes[self.pos % self.bytes.len()];
+                self.pos += 1;
+            }
+        }
+    }
+
+    impl ::hpke::rand_core::CryptoRng for FixedRng {}
+
+    const KAT_INFO: &[u8] = b"Ode on a Grecian Urn";
+    const KAT_AAD: &[u8] = b"Count-0";
+    const KAT_PT: &[u8] = b"Beauty is truth, truth beauty";
+
+    const BASE_IKME: &str = "2cd7c601cefb3d42a62b04b7a9041494c06c7843818e0ce28a8f704ae7ab20f9";
+    const BASE_SKRM: &str = "497b4502664cfea5d5af0b39934dac72242a74f8480451e1aee7d6a53320333d";
+    const BASE_PKRM: &str = "430f4b9859665145a6b1ba274024487bd66f03a2dd577d7753c68d7d7d00c00c";
+    const BASE_ENC: &str = "6c93e09869df3402d7bf231bf540fadd35cd56be14f97178f0954db94b7fc256";
+    const BASE_CT: &str = "e5d84cd531cfb583096e7cfa9641bd3079cf3a91cda813c52deb5f512be9931980a41de125a925cdad859d5b7a";
+
+    const AUTH_IKME: &str = "734369ab3061f71ee85e090fae308553cac8e7b3fbd45b4ba83d05e0cd05b1c4";
+    const AUTH_SKRM: &str = "47f1eee3670dfaaf27c30a83d06ee9f257af174727c17b35328ef730dfc1cd81";
+    const AUTH_SKSM: &str = "98fdf9b9773578a79d4ba82fbe483c74cc2e3b8d9525d148a18969fd79a74876";
+    const AUTH_PKRM: &str = "3668d659cec6f338f4f8dc6da6733118d2a633f186a3c1415c895111a8eb7c7d";
+    const AUTH_PKSM: &str = "4a91c3d0893433f5e31a79fc520f885527a1bc60bf2b0c72693dd7f0b2e41a5a";
+    const AUTH_ENC: &str = "9e59f4b1fa5c876f684765290c34e51145894cc4f244342b9fb1a4bdfd8bb426";
+    const AUTH_CT: &str = "10b964283ac2cc0bdc4c85ab617291b446bf3832e9359b2c3a0facc50ea75a3c1afd08aeaacd6041d02eb560ec";
+
+    fn kat_sender(
+        mode: &OpModeS<'_, X25519HkdfSha256>,
+        pk_r_hex: &str,
+        ikm_e: &str,
+        enc_hex: &str,
+        ct_hex: &str,
+    ) {
+        init();
+        let pk_r = <X25519HkdfSha256 as KemTrait>::PublicKey::from_bytes(&unhex(pk_r_hex)).unwrap();
+        let (enc, mut ctx) = setup_sender::<AesGcm256, HkdfSha256, X25519HkdfSha256, _>(
+            mode,
+            &pk_r,
+            KAT_INFO,
+            &mut FixedRng::new(ikm_e),
+        )
+        .unwrap();
+        assert_eq!(enc.to_bytes().as_slice(), unhex(enc_hex));
+
+        let mut buf = KAT_PT.to_vec();
+        let tag = ctx.seal_in_place_detached(&mut buf, KAT_AAD).unwrap();
+        buf.extend_from_slice(tag.to_bytes().as_slice());
+        assert_eq!(buf, unhex(ct_hex));
+    }
+
+    #[test]
+    fn kat_base_aes256_sender() {
+        kat_sender(&OpModeS::Base, BASE_PKRM, BASE_IKME, BASE_ENC, BASE_CT);
+    }
+
+    #[test]
+    fn kat_auth_aes256_sender() {
+        let sk_s =
+            <X25519HkdfSha256 as KemTrait>::PrivateKey::from_bytes(&unhex(AUTH_SKSM)).unwrap();
+        let pk_s =
+            <X25519HkdfSha256 as KemTrait>::PublicKey::from_bytes(&unhex(AUTH_PKSM)).unwrap();
+        kat_sender(
+            &OpModeS::Auth((sk_s, pk_s)),
+            AUTH_PKRM,
+            AUTH_IKME,
+            AUTH_ENC,
+            AUTH_CT,
+        );
+    }
+
+    fn aes256_config() -> Config {
+        Config {
+            kem: Kem::X25519Sha256,
+            kdf: Kdf::HkdfSha256,
+            aead: Aead::Aes256Gcm,
+        }
+    }
+
+    #[test]
+    fn kat_base_aes256_receiver() {
+        init();
+        let pk_r = PublicKey::from_x25519_bytes(&unhex(BASE_PKRM)).unwrap();
+        let sk_r = PrivateKey::from_x25519_bytes(&unhex(BASE_SKRM)).unwrap();
+        let mut hpke_r =
+            HpkeR::new(aes256_config(), &pk_r, &sk_r, &unhex(BASE_ENC), KAT_INFO).unwrap();
+        let pt = hpke_r.open(KAT_AAD, &unhex(BASE_CT)).unwrap();
+        assert_eq!(pt, KAT_PT);
+    }
+
+    #[test]
+    fn kat_auth_aes256_receiver() {
+        init();
+        let pk_r = PublicKey::from_x25519_bytes(&unhex(AUTH_PKRM)).unwrap();
+        let sk_r = PrivateKey::from_x25519_bytes(&unhex(AUTH_SKRM)).unwrap();
+        let pk_s = PublicKey::from_x25519_bytes(&unhex(AUTH_PKSM)).unwrap();
+        let mut hpke_r = AuthHpkeR::new(
+            aes256_config(),
+            &pk_r,
+            &sk_r,
+            &pk_s,
+            &unhex(AUTH_ENC),
+            KAT_INFO,
+        )
+        .unwrap();
+        let pt = hpke_r.open(KAT_AAD, &unhex(AUTH_CT)).unwrap();
+        assert_eq!(pt, KAT_PT);
     }
 }

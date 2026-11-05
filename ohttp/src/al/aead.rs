@@ -128,6 +128,7 @@ macro_rules! impl_engine {
 }
 
 impl_engine!(EngineAes128Gcm, &AES_128_GCM, U16);
+impl_engine!(EngineAes256Gcm, &AES_256_GCM, U32);
 impl_engine!(EngineChaCha20Poly1305, &CHACHA20_POLY1305, U32);
 
 /// DHKEM AEAD suite marker: AES-128-GCM on aws-lc.  Same `AEAD_ID` as
@@ -139,6 +140,17 @@ pub struct AwsAesGcm128;
 impl ::hpke::aead::Aead for AwsAesGcm128 {
     type AeadImpl = EngineAes128Gcm;
     const AEAD_ID: u16 = 1;
+}
+
+/// DHKEM AEAD suite marker: AES-256-GCM on aws-lc.  Same `AEAD_ID` as
+/// `hpke::aead::AesGcm256`, so the wire format and the (shared, unchanged)
+/// key schedule are bit-for-bit compatible.
+#[derive(Clone, Copy)]
+pub struct AwsAesGcm256;
+
+impl ::hpke::aead::Aead for AwsAesGcm256 {
+    type AeadImpl = EngineAes256Gcm;
+    const AEAD_ID: u16 = 2;
 }
 
 /// DHKEM AEAD suite marker: ChaCha20-Poly1305 on aws-lc.

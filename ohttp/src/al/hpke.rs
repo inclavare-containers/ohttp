@@ -13,7 +13,7 @@ use rust_hpke::{
 
 use super::SymKey;
 use super::{
-    aead::{AwsAesGcm128, AwsChaCha20Poly1305},
+    aead::{AwsAesGcm128, AwsAesGcm256, AwsChaCha20Poly1305},
     kem::{AwsX25519HkdfSha256, EncappedKey, PrivateKey as KemSk, PublicKey as KemPk},
 };
 use crate::{
@@ -48,7 +48,11 @@ impl Config {
     }
 
     pub fn supported(self) -> bool {
-        self.kdf == Kdf::HkdfSha256 && matches!(self.aead, Aead::Aes128Gcm | Aead::ChaCha20Poly1305)
+        self.kdf == Kdf::HkdfSha256
+            && matches!(
+                self.aead,
+                Aead::Aes128Gcm | Aead::Aes256Gcm | Aead::ChaCha20Poly1305
+            )
     }
 }
 
@@ -175,6 +179,7 @@ impl PrivateKey {
 // rust-hpke key schedule).
 enum SenderContextX25519HkdfSha256HkdfSha256 {
     AesGcm128(Box<AeadCtxS<AwsAesGcm128, HkdfSha256, AwsX25519HkdfSha256>>),
+    AesGcm256(Box<AeadCtxS<AwsAesGcm256, HkdfSha256, AwsX25519HkdfSha256>>),
     ChaCha20Poly1305(Box<AeadCtxS<AwsChaCha20Poly1305, HkdfSha256, AwsX25519HkdfSha256>>),
 }
 
@@ -196,6 +201,12 @@ impl SenderContext {
                 Vec::from(tag.to_bytes().as_slice())
             }
             Self::X25519HkdfSha256(SenderContextX25519HkdfSha256::HkdfSha256(
+                SenderContextX25519HkdfSha256HkdfSha256::AesGcm256(context),
+            )) => {
+                let tag = context.seal_in_place_detached(plaintext, aad)?;
+                Vec::from(tag.to_bytes().as_slice())
+            }
+            Self::X25519HkdfSha256(SenderContextX25519HkdfSha256::HkdfSha256(
                 SenderContextX25519HkdfSha256HkdfSha256::ChaCha20Poly1305(context),
             )) => {
                 let tag = context.seal_in_place_detached(plaintext, aad)?;
@@ -208,6 +219,11 @@ impl SenderContext {
         match self {
             Self::X25519HkdfSha256(SenderContextX25519HkdfSha256::HkdfSha256(
                 SenderContextX25519HkdfSha256HkdfSha256::AesGcm128(context),
+            )) => {
+                context.export(info, out_buf)?;
+            }
+            Self::X25519HkdfSha256(SenderContextX25519HkdfSha256::HkdfSha256(
+                SenderContextX25519HkdfSha256HkdfSha256::AesGcm256(context),
             )) => {
                 context.export(info, out_buf)?;
             }
@@ -287,6 +303,15 @@ impl HpkeS {
             {
                 Kem::X25519Sha256 => AwsX25519HkdfSha256,
                 Kdf::HkdfSha256 => HkdfSha256,
+                Aead::Aes256Gcm => AwsAesGcm256,
+                PublicKey::X25519,
+                SenderContext::X25519HkdfSha256,
+                SenderContextX25519HkdfSha256::HkdfSha256,
+                SenderContextX25519HkdfSha256HkdfSha256::AesGcm256,
+            },
+            {
+                Kem::X25519Sha256 => AwsX25519HkdfSha256,
+                Kdf::HkdfSha256 => HkdfSha256,
                 Aead::ChaCha20Poly1305 => AwsChaCha20Poly1305,
                 PublicKey::X25519,
                 SenderContext::X25519HkdfSha256,
@@ -354,6 +379,7 @@ impl Deref for HpkeS {
 
 enum ReceiverContextX25519HkdfSha256HkdfSha256 {
     AesGcm128(Box<AeadCtxR<AwsAesGcm128, HkdfSha256, AwsX25519HkdfSha256>>),
+    AesGcm256(Box<AeadCtxR<AwsAesGcm256, HkdfSha256, AwsX25519HkdfSha256>>),
     ChaCha20Poly1305(Box<AeadCtxR<AwsChaCha20Poly1305, HkdfSha256, AwsX25519HkdfSha256>>),
 }
 
@@ -381,6 +407,18 @@ impl ReceiverContext {
                 ct
             }
             Self::X25519HkdfSha256(ReceiverContextX25519HkdfSha256::HkdfSha256(
+                ReceiverContextX25519HkdfSha256HkdfSha256::AesGcm256(context),
+            )) => {
+                if ciphertext.len() < AeadTag::<AwsAesGcm256>::size() {
+                    return Err(Error::Truncated);
+                }
+                let (ct, tag_slice) =
+                    ciphertext.split_at_mut(ciphertext.len() - AeadTag::<AwsAesGcm256>::size());
+                let tag = AeadTag::<AwsAesGcm256>::from_bytes(tag_slice)?;
+                context.open_in_place_detached(ct, aad, &tag)?;
+                ct
+            }
+            Self::X25519HkdfSha256(ReceiverContextX25519HkdfSha256::HkdfSha256(
                 ReceiverContextX25519HkdfSha256HkdfSha256::ChaCha20Poly1305(context),
             )) => {
                 if ciphertext.len() < AeadTag::<AwsChaCha20Poly1305>::size() {
@@ -399,6 +437,11 @@ impl ReceiverContext {
         match self {
             Self::X25519HkdfSha256(ReceiverContextX25519HkdfSha256::HkdfSha256(
                 ReceiverContextX25519HkdfSha256HkdfSha256::AesGcm128(context),
+            )) => {
+                context.export(info, out_buf)?;
+            }
+            Self::X25519HkdfSha256(ReceiverContextX25519HkdfSha256::HkdfSha256(
+                ReceiverContextX25519HkdfSha256HkdfSha256::AesGcm256(context),
             )) => {
                 context.export(info, out_buf)?;
             }
@@ -475,6 +518,15 @@ impl HpkeR {
             {
                 Kem::X25519Sha256 => AwsX25519HkdfSha256,
                 Kdf::HkdfSha256 => HkdfSha256,
+                Aead::Aes256Gcm => AwsAesGcm256,
+                PrivateKey::X25519,
+                ReceiverContext::X25519HkdfSha256,
+                ReceiverContextX25519HkdfSha256::HkdfSha256,
+                ReceiverContextX25519HkdfSha256HkdfSha256::AesGcm256,
+            },
+            {
+                Kem::X25519Sha256 => AwsX25519HkdfSha256,
+                Kdf::HkdfSha256 => HkdfSha256,
                 Aead::ChaCha20Poly1305 => AwsChaCha20Poly1305,
                 PrivateKey::X25519,
                 ReceiverContext::X25519HkdfSha256,
@@ -540,6 +592,7 @@ impl Deref for HpkeR {
 
 enum AuthSenderContextX25519HkdfSha256HkdfSha256 {
     AesGcm128(Box<AeadCtxS<AwsAesGcm128, HkdfSha256, AwsX25519HkdfSha256>>),
+    AesGcm256(Box<AeadCtxS<AwsAesGcm256, HkdfSha256, AwsX25519HkdfSha256>>),
     ChaCha20Poly1305(Box<AeadCtxS<AwsChaCha20Poly1305, HkdfSha256, AwsX25519HkdfSha256>>),
 }
 
@@ -561,6 +614,12 @@ impl AuthSenderContext {
                 Vec::from(tag.to_bytes().as_slice())
             }
             Self::X25519HkdfSha256(AuthSenderContextX25519HkdfSha256::HkdfSha256(
+                AuthSenderContextX25519HkdfSha256HkdfSha256::AesGcm256(context),
+            )) => {
+                let tag = context.seal_in_place_detached(plaintext, aad)?;
+                Vec::from(tag.to_bytes().as_slice())
+            }
+            Self::X25519HkdfSha256(AuthSenderContextX25519HkdfSha256::HkdfSha256(
                 AuthSenderContextX25519HkdfSha256HkdfSha256::ChaCha20Poly1305(context),
             )) => {
                 let tag = context.seal_in_place_detached(plaintext, aad)?;
@@ -573,6 +632,11 @@ impl AuthSenderContext {
         match self {
             Self::X25519HkdfSha256(AuthSenderContextX25519HkdfSha256::HkdfSha256(
                 AuthSenderContextX25519HkdfSha256HkdfSha256::AesGcm128(context),
+            )) => {
+                context.export(info, out_buf)?;
+            }
+            Self::X25519HkdfSha256(AuthSenderContextX25519HkdfSha256::HkdfSha256(
+                AuthSenderContextX25519HkdfSha256HkdfSha256::AesGcm256(context),
             )) => {
                 context.export(info, out_buf)?;
             }
@@ -653,6 +717,16 @@ impl AuthHpkeS {
             {
                 Kem::X25519Sha256 => AwsX25519HkdfSha256,
                 Kdf::HkdfSha256 => HkdfSha256,
+                Aead::Aes256Gcm => AwsAesGcm256,
+                PublicKey::X25519,
+                PrivateKey::X25519,
+                AuthSenderContext::X25519HkdfSha256,
+                AuthSenderContextX25519HkdfSha256::HkdfSha256,
+                AuthSenderContextX25519HkdfSha256HkdfSha256::AesGcm256,
+            },
+            {
+                Kem::X25519Sha256 => AwsX25519HkdfSha256,
+                Kdf::HkdfSha256 => HkdfSha256,
                 Aead::ChaCha20Poly1305 => AwsChaCha20Poly1305,
                 PublicKey::X25519,
                 PrivateKey::X25519,
@@ -718,6 +792,7 @@ impl Deref for AuthHpkeS {
 
 enum AuthReceiverContextX25519HkdfSha256HkdfSha256 {
     AesGcm128(Box<AeadCtxR<AwsAesGcm128, HkdfSha256, AwsX25519HkdfSha256>>),
+    AesGcm256(Box<AeadCtxR<AwsAesGcm256, HkdfSha256, AwsX25519HkdfSha256>>),
     ChaCha20Poly1305(Box<AeadCtxR<AwsChaCha20Poly1305, HkdfSha256, AwsX25519HkdfSha256>>),
 }
 
@@ -745,6 +820,18 @@ impl AuthReceiverContext {
                 ct
             }
             Self::X25519HkdfSha256(AuthReceiverContextX25519HkdfSha256::HkdfSha256(
+                AuthReceiverContextX25519HkdfSha256HkdfSha256::AesGcm256(context),
+            )) => {
+                if ciphertext.len() < AeadTag::<AwsAesGcm256>::size() {
+                    return Err(Error::Truncated);
+                }
+                let (ct, tag_slice) =
+                    ciphertext.split_at_mut(ciphertext.len() - AeadTag::<AwsAesGcm256>::size());
+                let tag = AeadTag::<AwsAesGcm256>::from_bytes(tag_slice)?;
+                context.open_in_place_detached(ct, aad, &tag)?;
+                ct
+            }
+            Self::X25519HkdfSha256(AuthReceiverContextX25519HkdfSha256::HkdfSha256(
                 AuthReceiverContextX25519HkdfSha256HkdfSha256::ChaCha20Poly1305(context),
             )) => {
                 if ciphertext.len() < AeadTag::<AwsChaCha20Poly1305>::size() {
@@ -763,6 +850,11 @@ impl AuthReceiverContext {
         match self {
             Self::X25519HkdfSha256(AuthReceiverContextX25519HkdfSha256::HkdfSha256(
                 AuthReceiverContextX25519HkdfSha256HkdfSha256::AesGcm128(context),
+            )) => {
+                context.export(info, out_buf)?;
+            }
+            Self::X25519HkdfSha256(AuthReceiverContextX25519HkdfSha256::HkdfSha256(
+                AuthReceiverContextX25519HkdfSha256HkdfSha256::AesGcm256(context),
             )) => {
                 context.export(info, out_buf)?;
             }
@@ -841,6 +933,16 @@ impl AuthHpkeR {
                 AuthReceiverContext::X25519HkdfSha256,
                 AuthReceiverContextX25519HkdfSha256::HkdfSha256,
                 AuthReceiverContextX25519HkdfSha256HkdfSha256::AesGcm128,
+            },
+            {
+                Kem::X25519Sha256 => AwsX25519HkdfSha256,
+                Kdf::HkdfSha256 => HkdfSha256,
+                Aead::Aes256Gcm => AwsAesGcm256,
+                PrivateKey::X25519,
+                PublicKey::X25519,
+                AuthReceiverContext::X25519HkdfSha256,
+                AuthReceiverContextX25519HkdfSha256::HkdfSha256,
+                AuthReceiverContextX25519HkdfSha256HkdfSha256::AesGcm256,
             },
             {
                 Kem::X25519Sha256 => AwsX25519HkdfSha256,

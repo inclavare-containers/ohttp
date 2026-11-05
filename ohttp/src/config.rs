@@ -343,6 +343,15 @@ mod test {
     ];
 
     #[test]
+    fn aes256_suite_survives_strip_unsupported() {
+        init();
+
+        let suite = SymmetricSuite::new(Kdf::HkdfSha256, Aead::Aes256Gcm);
+        let config = KeyConfig::new(KEY_ID, KEM, vec![suite]).unwrap();
+        assert_eq!(config.symmetric(), &[suite]);
+    }
+
+    #[test]
     fn encode_decode_config_list() {
         const COUNT: usize = 3;
         init();
